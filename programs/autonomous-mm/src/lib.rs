@@ -38,6 +38,8 @@
 //      facendole firmare initialize: una PDA non può produrre una firma.
 //  I13 solo EXPECTED_DEPLOYER può chiamare initialize: senza questo vincolo
 //      chiunque potrebbe anticipare il deployer e fissarsi come treasury.
+//  I14 `quote` rispetta gli stessi limiti di `buy`/`sell`: non preventiva mai
+//      un trade che il settlement rifiuterebbe. Vista e regolamento coincidono.
 //
 // ROUNDING DIREZIONALE: BUY ceil, SELL floor, V(S) per il check di
 // solvibilità ceil (liability sovrastimata), cut floor.
@@ -357,8 +359,15 @@ pub mod autonomous_mm {
     }
 
     /// Quote read-only: (costo buy, rimborso sell) per `amount`.
+    ///
+    /// I14: il preventivo rispetta gli stessi limiti del settlement. Preventivare
+    /// un acquisto che `buy` rifiuterebbe sarebbe informazione falsa, e i
+    /// frontend si fidano del preventivo: e' il suo scopo.
     pub fn quote(ctx: Context<Quote>, amount: u64) -> Result<(u64, u64)> {
-        let s = ctx.accounts.mint.supply as u128;
+        let supply = ctx.accounts.mint.supply;
+        let s_post = supply.checked_add(amount).ok_or(MmError::Overflow)?;
+        require!(s_post <= MAX_SUPPLY, MmError::MaxSupplyExceeded); // I1, come in buy
+        let s = supply as u128;
         let (c, _) = cost_buy(s, amount as u128).ok_or(MmError::Overflow)?;
         let r = if (amount as u128) <= s {
             refund_sell(s - amount as u128, amount as u128).ok_or(MmError::Overflow)?.0

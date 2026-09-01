@@ -250,15 +250,18 @@ impl Env {
     /// Esegue `quote` e decodifica la coppia (costo buy, rimborso sell) dai
     /// return data Anchor: borsh di (u64, u64) = 16 byte little-endian.
     pub fn quote(&mut self, amount: u64, payer: &Keypair) -> (u64, u64) {
-        let meta = self
-            .send_meta(ix_quote(amount), &[payer])
-            .expect("quote non deve fallire");
+        self.try_quote(amount, payer).expect("quote non deve fallire")
+    }
+
+    /// Variante fallibile: serve ai test che si aspettano un rifiuto.
+    pub fn try_quote(&mut self, amount: u64, payer: &Keypair) -> Result<(u64, u64), String> {
+        let meta = self.send_meta(ix_quote(amount), &[payer])?;
         let d = &meta.return_data.data;
         assert_eq!(d.len(), 16, "return data di quote inatteso: {} byte", d.len());
-        (
+        Ok((
             u64::from_le_bytes(d[0..8].try_into().unwrap()),
             u64::from_le_bytes(d[8..16].try_into().unwrap()),
-        )
+        ))
     }
 
     pub fn lamports(&self, k: &Pubkey) -> u64 {

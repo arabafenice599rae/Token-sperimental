@@ -4,6 +4,10 @@ Market maker autonomo minimale su Solana: un token il cui prezzo dipende
 esclusivamente dalla supply, senza oracoli, senza owner e senza istruzioni di
 prelievo.
 
+> **Due vincoli non negoziabili.** La build va fatta con `--arch v3`
+> (SIMD-0500 vieta il deploy di SBPF v0/v1/v2), e i test devono girare sullo
+> stesso `.so` che si deploya. Il perché è in cima a `SECURITY.md`.
+
 ## Curva
 
 ```
@@ -35,14 +39,14 @@ Gli invarianti `I1`–`I12` e i lemmi `L1`–`L3` sono documentati in testa a
 | `initialize` | deployer + **treasury** | la treasury firma per provare di stare sulla curva ed25519 |
 | `buy(amount, max_cost)` | utente | minta, con guardia di slippage |
 | `sell(amount, min_refund)` | utente | brucia, con guardia di slippage |
-| `quote(amount)` | nessuna | sola lettura, non coperta da test |
+| `quote(amount)` | nessuna | sola lettura; rispetta gli stessi limiti del settlement (I14) |
 
 ## Build e test
 
 ```bash
 cargo test -p autonomous-mm --lib   # 33 test matematici (17 property-based)
 cargo-build-sbf --arch v3           # artefatto deployabile in target/deploy/
-cd integration && cargo test        # 30 test on-chain su litesvm
+cd integration && cargo test        # 32 test on-chain su litesvm
 ```
 
 `--arch v3` non è opzionale: `cargo-build-sbf` produce SBPF v0 di default, e
@@ -68,7 +72,7 @@ La toolchain viene installata automaticamente dal SessionStart hook in
 
 ## Stato
 
-63 test verdi: 33 sulla matematica pura, 30 sull'artefatto SBF eseguito in VM.
+65 test verdi: 33 sulla matematica pura, 32 sull'artefatto SBF eseguito in VM.
 Il programma è stato inoltre deployato su un `solana-test-validator` reale,
 dove consuma **19 397 CU** per un buy e **19 752** per un sell (budget di
 default 200 000), emette gli eventi correttamente via RPC e continua a

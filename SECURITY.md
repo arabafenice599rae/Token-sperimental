@@ -1,5 +1,24 @@
 # Dossier di sicurezza
 
+## Da leggere per primo
+
+**1. La build DEVE usare `--arch v3`.** `cargo-build-sbf` emette SBPF v0 di
+default, e la feature SIMD-0500 vieta il deploy di v0, v1 e v2: l'artefatto di
+default viene rifiutato dal loader su qualunque cluster aggiornato.
+
+**2. I test DEVONO girare sullo stesso artefatto che si deploya.** È il
+corollario metodologico del punto 1, e conta più del punto 1. La prima versione
+di questa suite usava litesvm 0.6, che non carica SBPFv3: i test verificavano un
+bytecode v0 mentre il deploy ne richiedeva uno v3. Trenta test verdi su un
+binario che non è quello spedito — un difetto che **non produce mai un test
+rosso** e che invaliderebbe l'intero audit a valle. È stato chiuso allineando il
+crate di test su litesvm 0.16 e solana-sdk 4.0.1. Chiunque tocchi le dipendenze
+del crate `integration` deve verificare che questa proprietà regga ancora:
+`readelf -h target/deploy/autonomous_mm.so` deve riportare `CPU Version: 3`, e i
+test devono caricare quel file.
+
+---
+
 Stato della verifica del programma `autonomous-mm` al termine della campagna di
 test. Pensato per essere il punto di partenza di un audit esterno: dice cosa è
 stato verificato, **come**, e soprattutto cosa **non** lo è.
@@ -70,7 +89,7 @@ nascondersi dietro lo stesso errore ripetuto nel test.
 - comportamento ai bordi e su overflow (`None`, mai panic);
 - `guard_treasury` esaustivo sui casi al contorno, incluso l'overflow del saldo.
 
-### Livello on-chain — 30 test sull'artefatto realmente deployato (litesvm)
+### Livello on-chain — 32 test sull'artefatto realmente deployato (litesvm)
 
 I test caricano **lo stesso file `.so` compilato `--arch v3` che viene poi
 deployato sul validator**. Non è un dettaglio: la prima versione di questa
@@ -110,11 +129,17 @@ supply 0, Δ=1, Δ pari all'intera supply, supply prossima al massimo.
 - deterministica e priva di effetti sullo stato;
 - monotona in quantità e in supply.
 
-Una divergenza documentata: **`quote` non applica il tetto `MAX_SUPPLY`**, quindi
-preventiva anche acquisti che `buy` rifiuterebbe con `MaxSupplyExceeded`. Non è
-sfruttabile — nessun fondo si muove — ma un frontend che si fidasse del solo
-preventivo mostrerebbe un prezzo per un trade impossibile. Il comportamento è
-fissato da un test, così un eventuale cambiamento non passerà in silenzio.
+**I14 — vista e settlement rispettano gli stessi limiti.** `quote` applicava il
+tetto `MAX_SUPPLY`? No: preventivava anche acquisti che `buy` rifiuta. Un
+preventivo per un trade impossibile è informazione falsa, e i frontend si fidano
+del preventivo — è il suo scopo. Ora `quote` restituisce `MaxSupplyExceeded`
+esattamente come `buy`, e due test lo fissano: uno oltre il tetto (rifiuto con
+lo stesso codice d'errore del settlement) e uno **al limite esatto**, dove il
+preventivo deve invece funzionare e coincidere col costo effettivo — così il
+tetto non può essere applicato con un fuori-di-uno.
+
+Il rimborso 0 per Δ maggiore della supply resta com'era: lì il comportamento è
+già onesto, perché quella vendita non è impossibile, è semplicemente vuota.
 
 ### Deploy su validator reale
 
@@ -162,6 +187,8 @@ giro**, e la suite è stata rafforzata di conseguenza:
 | rimozione del check sul deployer | rilevata (1 test) | — |
 | rimozione del tetto `MAX_SUPPLY` | **sopravvissuta** | rilevata (1 test) |
 | rimozione di `address = state.treasury` | rilevata (1 test) | — |
+| rimozione del check I8 sul rent floor | — | rilevata (1 test) |
+| rimozione del tetto `MAX_SUPPLY` da `quote` | — | rilevata (2 test) |
 
 La mutazione sul tetto di supply sopravviveva perché il test negativo accettava
 un fallimento qualunque, e la transazione falliva per fondi insufficienti — il
@@ -176,14 +203,44 @@ motivo sbagliato. Tutti i test negativi ora pretendono il codice d'errore atteso
 2. **Nessun test di concorrenza reale.** Due utenti che comprano nello stesso
    slot non sono stati simulati; la correttezza in quel caso discende dalla
    serializzazione delle transazioni, non da una verifica.
-3. **Variazione dei parametri di rent.** I5 usa il rent floor corrente. Un
-   aumento del rent deciso dal cluster potrebbe teoricamente rendere attivo il
-   check I8, oggi inerte. Non simulato.
+3. **Variazione dei parametri di rent** — vedi la sezione dedicata qui sotto:
+   l'effetto è analizzato e testato, ma un aumento reale del rent non è
+   simulabile in litesvm, che non espone i parametri di rent del cluster.
 4. **Costo in compute unit.** Non misurato ai bordi. `Trade` ricalcola la PDA
    del mint a ogni istruzione (`bump` non memorizzato): funziona, ma è spesa
    evitabile.
 5. **Analisi formale.** Gli invarianti sono verificati per campionamento
    massiccio, non dimostrati.
+
+## Il vault sta a margine zero: cosa succede se il rent aumenta
+
+Sul validator reale, dopo i trade, il vault si trova **esattamente** a
+`rent_floor + V(S)`. Non è un caso: il cut preleva per costruzione tutto ciò che
+eccede il valore della curva, quindi il margine è zero. È il significato di
+«senza cushion».
+
+`rent_floor` non è però una costante: il programma lo legge a ogni trade con
+`Rent::get()`. Se Solana alzasse il minimo rent-exempt, il vault — fermo al
+*vecchio* floor più `V(S)` — si troverebbe **sotto** il nuovo floor, e l'ultimo
+venditore in uscita verso supply 0 verrebbe respinto da I8
+(`InsufficientReserve`).
+
+**Nessun fondo andrebbe perso.** Il vault è un system account: i depositi sono
+permissionless e non passano da alcuna istruzione del programma. Chiunque —
+il venditore bloccato, la treasury, un terzo qualsiasi — può trasferirgli
+lamports e sbloccare l'uscita. Il sistema è auto-riparabile al costo di una
+donazione dell'ordine di **0,001 SOL**.
+
+La proprietà non è solo asserita, è testata
+(`a_vault_below_the_floor_is_unblocked_by_any_donation`): il vault viene portato
+sotto la soglia, il sell viene respinto con `InsufficientReserve` senza bruciare
+token né intaccare il saldo dell'utente, una donazione di 500 000 lamport lo
+ripiana, e la vendita successiva riesce **allo stesso prezzo di prima**. Il test
+è validato per mutazione: rimuovendo il check I8 dal programma, fallisce.
+
+Ciò che resta non verificato è l'aumento del rent in sé: litesvm non espone i
+parametri di rent del cluster, quindi il test ne riproduce l'**effetto**
+(vault sotto soglia), non la causa.
 
 ## Prima del deploy in produzione
 
@@ -204,7 +261,7 @@ motivo sbagliato. Tutti i test negativi ora pretendono il codice d'errore atteso
 ```bash
 cargo test -p autonomous-mm --lib   # 33 test matematici
 cargo-build-sbf --arch v3           # artefatto SBF (v3 obbligatorio, vedi difetto 5)
-cd integration && cargo test        # 30 test on-chain
+cd integration && cargo test        # 32 test on-chain
 ```
 
 Prova su validator reale (richiede `solana-test-validator` attivo e il

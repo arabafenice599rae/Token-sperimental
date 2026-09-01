@@ -178,28 +178,50 @@ fn quote_price_rises_with_supply() {
 }
 
 // ===========================================================================
-// 3. Divergenza nota fra preventivo e regole di esecuzione
+// 3. Vista e settlement rispettano gli stessi limiti (I14)
 // ===========================================================================
 
-/// `quote` non applica il tetto `MAX_SUPPLY`: preventiva un acquisto che `buy`
-/// rifiuterebbe. Non è sfruttabile — nessun fondo si muove — ma un frontend che
-/// si fidasse del solo preventivo mostrerebbe un prezzo per un trade impossibile.
-/// Il test documenta il comportamento attuale: se un giorno `quote` iniziasse a
-/// rifiutare, questo test lo segnalerebbe invece di lasciarlo passare in
-/// silenzio.
+/// `quote` applica il tetto `MAX_SUPPLY` esattamente come `buy`: un preventivo
+/// per un trade impossibile sarebbe informazione falsa, e i frontend si fidano
+/// del preventivo — e' il suo scopo.
 #[test]
-fn quote_prices_trades_that_buy_would_reject() {
+fn quote_rejects_what_buy_would_reject() {
     let mut env = initialized();
     let (user, token) = env.new_user(900_000);
     reach_supply(&mut env, &user, &token, 900_000_000_000);
 
     let over = 200_000_000_000u64; // 900e9 + 200e9 > MAX_SUPPLY
-    let (cost, _) = env.quote(over, &user);
-    assert!(cost > 0, "quote preventiva comunque il trade");
+    let err = env
+        .try_quote(over, &user)
+        .expect_err("quote deve rifiutare un trade oltre MAX_SUPPLY");
+    assert!(err.contains("Custom(6000)"), "atteso MaxSupplyExceeded, ottenuto {err}");
 
+    // e il buy corrispondente lo rifiuta con lo stesso errore
     let treasury = env.treasury;
     let err = env
         .send(ix_buy(over, u64::MAX, &treasury, &user.pubkey(), &token), &[&user])
         .expect_err("il buy corrispondente deve essere rifiutato");
+    assert!(err.contains("Custom(6000)"), "atteso MaxSupplyExceeded, ottenuto {err}");
+}
+
+/// Al limite esatto il preventivo deve invece funzionare, e coincidere col
+/// settlement: il tetto non deve essere applicato con un fuori-di-uno.
+#[test]
+fn quote_works_exactly_at_the_supply_ceiling() {
+    let mut env = initialized();
+    let (user, token) = env.new_user(900_000);
+    let start = 900_000_000_000u64;
+    reach_supply(&mut env, &user, &token, start);
+
+    let exact = MAX_SUPPLY - start; // porta esattamente a MAX_SUPPLY
+    let (cost, _) = env.quote(exact, &user);
+    assert!(cost > 0);
+
+    let actual = actual_buy_cost(&mut env, &user, &token, exact);
+    assert_eq!(actual, cost, "al limite esatto quote e settlement divergono");
+    assert_eq!(env.supply(), MAX_SUPPLY, "la supply deve poter arrivare al tetto");
+
+    // un solo token oltre: rifiutato da entrambi
+    let err = env.try_quote(1, &user).expect_err("oltre il tetto quote deve rifiutare");
     assert!(err.contains("Custom(6000)"), "atteso MaxSupplyExceeded, ottenuto {err}");
 }
