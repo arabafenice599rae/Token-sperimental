@@ -1,0 +1,24 @@
+# Workspace a se stante: isola litesvm/solana-sdk dalle dipendenze di Anchor,
+# che altrimenti si unificherebbero e romperebbero la build SBF.
+[workspace]
+
+[package]
+name = "autonomous-mm-integration"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# Crate di soli test: carica l'artefatto SBF compilato in una VM in-process.
+# Non dipende dal crate del programma, così la coppia litesvm/solana-sdk resta
+# libera di evolvere senza dover combaciare con le dipendenze di Anchor.
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+litesvm = "0.6.1"
+solana-sdk = "2.2"
+sha2 = "0.10"
+
+[dev-dependencies]
+proptest = "1.11.0"

@@ -34,7 +34,10 @@
 //      stato della treasury: se non è (system-owned ∧ 0 dati ∧ rent-exempt
 //      post-cut) il cut è 0 e resta nel vault. Verificato a ogni trade.
 //  I12 la treasury è un indirizzo sulla curva ed25519 (non PDA di alcun
-//      programma) e distinto da vault/state/mint/programmi.
+//      programma) e distinto da vault/state/mint/programmi. Provato
+//      facendole firmare initialize: una PDA non può produrre una firma.
+//  I13 solo EXPECTED_DEPLOYER può chiamare initialize: senza questo vincolo
+//      chiunque potrebbe anticipare il deployer e fissarsi come treasury.
 //
 // ROUNDING DIREZIONALE: BUY ceil, SELL floor, V(S) per il check di
 // solvibilità ceil (liability sovrastimata), cut floor.
@@ -58,6 +61,15 @@ pub const HALF_DEN: u128 = 20_000; // x*(20000±PHI_BPS)/20000 = x*(1±φ/2)
 pub const BPS: u128 = 10_000;
 pub const DEN: u128 = P0_DEN * 3 * S0 * S0; // costante, calcolata a compile time
 pub const TOKEN_DECIMALS: u8 = 6;
+
+/// Unico account autorizzato a chiamare `initialize`. Senza questo vincolo
+/// chiunque potrebbe invocarla per primo fra il deploy e l'init e fissare la
+/// treasury sul proprio indirizzo, in modo permanente (I9).
+///
+/// ATTENZIONE: questo e' il deployer di TEST, derivato dal seed [7u8; 32]
+/// (vedi `integration/src/lib.rs`). PRIMA DEL DEPLOY IN PRODUZIONE va
+/// sostituito con la pubkey reale del deployer.
+pub const EXPECTED_DEPLOYER: Pubkey = pubkey!("GmaDrppBC7P5ARKV8g3djiwP89vz1jLK23V2GBjuAEGB");
 
 // ---- Teoremi a compile time -------------------------------------------------
 const fn n_const(s: u128) -> Option<u128> {
@@ -94,6 +106,7 @@ pub enum MmError {
     #[msg("riserva insufficiente")] InsufficientReserve,
     #[msg("supply insufficiente per la vendita")] InsufficientSupply,
     #[msg("treasury non valida (PDA, o account del protocollo)")] InvalidTreasury,
+    #[msg("chiamante non autorizzato")] Unauthorized,
 }
 
 #[event]
@@ -186,10 +199,22 @@ pub struct MarketState {
 pub mod autonomous_mm {
     use super::*;
 
-    pub fn initialize(ctx: Context<Initialize>, treasury: Pubkey) -> Result<()> {
-        // I12: sulla curva ⇒ non e' PDA di nessun programma; e non e' un
-        // account del protocollo o un programma.
-        require!(treasury.is_on_curve(), MmError::InvalidTreasury);
+    pub fn initialize(ctx: Context<Initialize>) -> Result<()> {
+        // I13: solo il deployer previsto puo' inizializzare. Chiude la finestra
+        // di front-running fra deploy e init.
+        require_keys_eq!(
+            ctx.accounts.payer.key(),
+            EXPECTED_DEPLOYER,
+            MmError::Unauthorized
+        );
+        // I12: la treasury deve FIRMARE. Una firma ed25519 valida prova il
+        // possesso della chiave privata, quindi che l'indirizzo sta sulla
+        // curva, quindi che non e' la PDA di nessun programma.
+        //
+        // NOTA: `Pubkey::is_on_curve()` NON e' utilizzabile qui — sotto
+        // target_os="solana" il suo corpo e' `unimplemented!()` e farebbe
+        // panicare il programma on-chain.
+        let treasury = ctx.accounts.treasury.key();
         require!(treasury != ctx.accounts.vault.key(), MmError::InvalidTreasury);
         require!(treasury != ctx.accounts.state.key(), MmError::InvalidTreasury);
         require!(treasury != ctx.accounts.mint.key(), MmError::InvalidTreasury);
@@ -361,6 +386,10 @@ pub struct Initialize<'info> {
     /// impossibile la manipolazione diretta dei lamports da parte del programma.
     #[account(mut, seeds = [b"vault"], bump)]
     pub vault: UncheckedAccount<'info>,
+    /// La treasury firma l'init: e' l'unico modo on-chain di dimostrare che
+    /// l'indirizzo sta sulla curva ed25519 (I12). Non riceve e non paga nulla
+    /// in questa istruzione.
+    pub treasury: Signer<'info>,
     #[account(mut)]
     pub payer: Signer<'info>,
     pub system_program: Program<'info, System>,
@@ -402,6 +431,9 @@ pub struct Quote<'info> {
     #[account(seeds = [b"mint"], bump, address = state.mint)]
     pub mint: Account<'info, Mint>,
 }
+
+#[cfg(test)]
+mod tests_math;
 
 // ============================================================================
 // TEST DELLE PROPRIETÀ (matematica pura)
