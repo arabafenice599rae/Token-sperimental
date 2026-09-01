@@ -27,12 +27,20 @@ audit dovrebbe verificare in fase di deploy.
 | 2 | `guard_never_bricks_trade` asseriva un valore aritmeticamente sbagliato | test errato | esecuzione dei test |
 | 3 | **`Pubkey::is_on_curve()` fa panicare il programma on-chain** | **critica** | esecuzione del binario SBF in VM |
 | 4 | `initialize` invocabile da chiunque (front-running della treasury) | alta | revisione del codice |
+| 5 | l'artefatto di default (SBPF v0) non è deployabile | blocca il deploy | deploy su validator reale |
 
 Il difetto 3 merita attenzione: sotto `target_os = "solana"` il corpo di
 `is_on_curve` è letteralmente `unimplemented!()`. Il programma compilava, i test
 unitari passavano, e `initialize` sarebbe **panicata su ogni cluster reale** —
 il mercato non sarebbe mai stato inizializzabile. Nessuna analisi statica lo
 avrebbe mostrato: è servito eseguire l'artefatto SBF.
+
+Il difetto 5 è emerso solo tentando un deploy vero: `cargo-build-sbf` produce
+SBPF v0 di default, e la feature **SIMD-0500 (Disable deployment of SBPF v0, v1
+and v2 programs)** è attiva su Agave 4.2. Il loader rifiuta con «Detected
+sbpf_version required by the executable which are not enabled». La build va
+fatta con `--arch v3`. Nessun test in VM lo avrebbe mostrato: litesvm carica il
+bytecode direttamente, senza passare dal loader.
 
 La prova che la treasury sta sulla curva ed25519 (I12) è ora ottenuta
 facendole **firmare** `initialize`: una PDA non possiede chiave privata e non
@@ -62,7 +70,14 @@ nascondersi dietro lo stesso errore ripetuto nel test.
 - comportamento ai bordi e su overflow (`None`, mai panic);
 - `guard_treasury` esaustivo sui casi al contorno, incluso l'overflow del saldo.
 
-### Livello on-chain — 24 test su artefatto SBF reale (litesvm)
+### Livello on-chain — 30 test sull'artefatto realmente deployato (litesvm)
+
+I test caricano **lo stesso file `.so` compilato `--arch v3` che viene poi
+deployato sul validator**. Non è un dettaglio: la prima versione di questa
+suite girava su litesvm 0.6, che non supporta SBPFv3 e obbligava a testare un
+bytecode v0 diverso da quello deployabile. L'allineamento su litesvm 0.16 e
+solana-sdk 4.0.1 elimina quella discrepanza — vedi la nota sulle dipendenze in
+fondo.
 
 I valori prodotti dal programma sono confrontati con una **implementazione
 indipendente** della curva, riscritta dalla specifica nel crate di test.
@@ -82,6 +97,55 @@ indipendente** della curva, riscritta dalla specifica nel crate di test.
 - bank run on-chain: ogni detentore esce e riceve esattamente quanto promesso;
 - nessuna istruzione di prelievo esiste (sette nomi plausibili, tutti rifiutati);
 - due trade nella stessa transazione: il secondo vede la supply aggiornata.
+
+### `quote` — test metamorfici
+
+Il preventivo è confrontato **al lamport** con il settlement che ne consegue,
+su una griglia di undici combinazioni (supply, taglia) che include i bordi:
+supply 0, Δ=1, Δ pari all'intera supply, supply prossima al massimo.
+
+- `quote(Δ).0` coincide con il costo effettivo del `buy(Δ)` successivo;
+- `quote(Δ).1` coincide con il rimborso effettivo del `sell(Δ)` successivo;
+- Δ oltre la supply ⇒ rimborso 0;
+- deterministica e priva di effetti sullo stato;
+- monotona in quantità e in supply.
+
+Una divergenza documentata: **`quote` non applica il tetto `MAX_SUPPLY`**, quindi
+preventiva anche acquisti che `buy` rifiuterebbe con `MaxSupplyExceeded`. Non è
+sfruttabile — nessun fondo si muove — ma un frontend che si fidasse del solo
+preventivo mostrerebbe un prezzo per un trade impossibile. Il comportamento è
+fissato da un test, così un eventuale cambiamento non passerà in silenzio.
+
+### Deploy su validator reale
+
+Eseguito su `solana-test-validator` 4.2.2, con l'artefatto compilato
+`--arch v3`:
+
+| Istruzione | Compute unit | Quota del budget di default (200 000) |
+|---|---|---|
+| `initialize` | 26 006 | 13.0% |
+| `buy` | 19 397 | 9.7% |
+| `sell` | 19 752 | 9.9% |
+
+Il margine è ampio: l'aritmetica u128 non è gratuita ma resta lontana dal
+limite, e non serve richiedere budget aggiuntivo.
+
+Verificato inoltre che costi e rimborsi coincidono al lamport con la curva di
+riferimento anche fuori da litesvm, e che gli eventi `TradeEvent` arrivano via
+RPC nelle righe `Program data:` con tutti i campi corretti (`is_buy`, `amount`,
+`lamports`, `treasury_cut`, `supply_after`).
+
+**Cerimonia di immutabilità, provata end-to-end:**
+
+1. deploy → upgrade authority = deployer;
+2. `initialize`, un `buy`, un `sell` → tutto regolare;
+3. `solana program set-upgrade-authority <id> --final`;
+4. `solana program show` → `Authority: none`;
+5. nuovo `buy` e `sell` → funzionano, stessi prezzi, eventi presenti, I5 rispettato;
+6. tentativo di re-deploy → «Program is no longer upgradeable».
+
+Il punto 5 è quello che conta: finché il passo 3 non è eseguito, ogni invariante
+in questo documento è una promessa revocabile dal detentore dell'authority.
 
 ### Mutation testing
 
@@ -105,12 +169,13 @@ motivo sbagliato. Tutti i test negativi ora pretendono il codice d'errore atteso
 
 ## Cosa NON è verificato
 
-1. **Nessun deploy su cluster reale.** I test girano in `litesvm`, che è una VM
-   in-process: fedele all'esecuzione SBF, ma non copre fee di priorità,
-   congestione, limiti di compute unit sotto carico, né il comportamento del
-   loader in upgrade.
-2. **`quote` non è testata.** Restituisce dati via return-data Anchor; il
-   percorso non è coperto da alcun test.
+1. **Nessun cluster condiviso.** Il deploy è stato provato su un
+   `solana-test-validator` locale, a nodo singolo e senza traffico: non copre
+   fee di priorità, congestione, riorganizzazioni, né il comportamento sotto
+   carico concorrente.
+2. **Nessun test di concorrenza reale.** Due utenti che comprano nello stesso
+   slot non sono stati simulati; la correttezza in quel caso discende dalla
+   serializzazione delle transazioni, non da una verifica.
 3. **Variazione dei parametri di rent.** I5 usa il rent floor corrente. Un
    aumento del rent deciso dal cluster potrebbe teoricamente rendere attivo il
    check I8, oggi inerte. Non simulato.
@@ -123,7 +188,10 @@ motivo sbagliato. Tutti i test negativi ora pretendono il codice d'errore atteso
 ## Prima del deploy in produzione
 
 - [ ] sostituire `EXPECTED_DEPLOYER` — oggi è la chiave di **test** derivata dal
-      seed `[7u8; 32]`, di cui chiunque legga questo repo possiede la privata;
+      seed `[7u8; 32]`, di cui chiunque legga questo repo possiede la privata.
+      Va fatto **prima di qualsiasi cluster condiviso, devnet inclusa**: là
+      chiunque potrebbe inizializzare il mercato al posto vostro;
+- [ ] compilare con `--arch v3`: l'artefatto di default non è deployabile;
 - [ ] sostituire il program id con quello della keypair di deploy reale;
 - [ ] decidere e documentare il destino dell'upgrade authority;
 - [ ] conservare in modo sicuro la keypair della treasury: le serve firmare
@@ -135,9 +203,30 @@ motivo sbagliato. Tutti i test negativi ora pretendono il codice d'errore atteso
 
 ```bash
 cargo test -p autonomous-mm --lib   # 33 test matematici
-cargo-build-sbf                     # artefatto SBF
-cd integration && cargo test        # 24 test on-chain
+cargo-build-sbf --arch v3           # artefatto SBF (v3 obbligatorio, vedi difetto 5)
+cd integration && cargo test        # 30 test on-chain
 ```
 
+Prova su validator reale (richiede `solana-test-validator` attivo e il
+programma deployato):
+
+```bash
+cargo run --bin ceremony -- <keypair-deployer>          # CU, eventi, I5
+cargo run --bin ceremony -- <keypair-deployer> post     # dopo la finalizzazione
+```
+
+### Nota sulle dipendenze
+
 Il crate `integration` è un workspace separato di proposito: unificare le sue
-dipendenze con quelle di Anchor rompe la build SBF.
+dipendenze con quelle di Anchor rompe la build SBF (feature unification su
+`getrandom`).
+
+Due vincoli sono deliberati e non vanno "aggiornati" senza verificare:
+
+- `solana-sdk` è pinnato a **=4.0.1**. La 4.1 richiede `solana-short-vec ^3.3`
+  mentre litesvm 0.16 richiede `~3.2.2`: sono incompatibili e la risoluzione
+  fallisce.
+- `five8_core` è dichiarato con la feature **`std`** attiva. La 0.1.x è
+  `no_std` e senza quella feature non implementa `Error`, il che rompe la
+  compilazione di `solana-keypair 3.1.2` con un messaggio che non nomina mai
+  `five8_core`.

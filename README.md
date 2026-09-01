@@ -41,21 +41,41 @@ Gli invarianti `I1`–`I12` e i lemmi `L1`–`L3` sono documentati in testa a
 
 ```bash
 cargo test -p autonomous-mm --lib   # 33 test matematici (17 property-based)
-cargo-build-sbf                     # artefatto deployabile in target/deploy/
-cd integration && cargo test        # 24 test on-chain su litesvm
+cargo-build-sbf --arch v3           # artefatto deployabile in target/deploy/
+cd integration && cargo test        # 30 test on-chain su litesvm
 ```
+
+`--arch v3` non è opzionale: `cargo-build-sbf` produce SBPF v0 di default, e
+SIMD-0500 ne vieta il deploy su Agave 4.2. Senza quel flag l'artefatto non è
+deployabile su nessun cluster aggiornato.
 
 `integration/` è un workspace separato di proposito: unificare le sue
 dipendenze con quelle di Anchor rompe la build SBF.
+
+### Prova su validator reale
+
+```bash
+solana-test-validator --reset &
+solana program deploy target/deploy/autonomous_mm.so \
+  --program-id target/deploy/autonomous_mm-keypair.json -k <deployer>
+cargo run --bin ceremony -- <deployer>        # initialize, buy, sell, CU, eventi
+solana program set-upgrade-authority <id> --final -k <deployer>
+cargo run --bin ceremony -- <deployer> post   # il mercato regge da immutabile
+```
 
 La toolchain viene installata automaticamente dal SessionStart hook in
 `.claude/hooks/session-start.sh`.
 
 ## Stato
 
-57 test verdi: 33 sulla matematica pura, 24 sull'artefatto SBF reale eseguito in
-VM. La suite è stata validata con mutation testing — vedi `SECURITY.md` per il
-dettaglio, i difetti trovati e, soprattutto, cosa resta non verificato.
+63 test verdi: 33 sulla matematica pura, 30 sull'artefatto SBF eseguito in VM.
+Il programma è stato inoltre deployato su un `solana-test-validator` reale,
+dove consuma **19 397 CU** per un buy e **19 752** per un sell (budget di
+default 200 000), emette gli eventi correttamente via RPC e continua a
+funzionare dopo che l'upgrade authority è stata bruciata.
+
+La suite è stata validata con mutation testing — vedi `SECURITY.md` per il
+dettaglio, i difetti trovati e cosa resta non verificato.
 
 **Non è pronto per la produzione così com'è.** `EXPECTED_DEPLOYER` contiene una
 chiave di test la cui privata è derivabile dal seed `[7u8; 32]` scritto in

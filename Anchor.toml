@@ -16,3 +16,4 @@ wallet = "~/.config/solana/id.json"
 
 [scripts]
 test = "cargo test --manifest-path programs/autonomous-mm/Cargo.toml"
+build = "cargo-build-sbf --arch v3"

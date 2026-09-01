@@ -7,6 +7,7 @@
 
 use litesvm::LiteSVM;
 use sha2::{Digest, Sha256};
+use solana_system_interface::program::ID as SYSTEM_PROGRAM_ID;
 use solana_sdk::{
     account::Account,
     instruction::{AccountMeta, Instruction},
@@ -14,7 +15,6 @@ use solana_sdk::{
     pubkey::Pubkey,
     signature::Keypair,
     signer::{keypair::keypair_from_seed, Signer},
-    system_program,
     transaction::Transaction,
 };
 
@@ -74,7 +74,7 @@ pub fn ix_initialize(payer: &Pubkey, treasury: &Pubkey) -> Instruction {
             AccountMeta::new(vault_pda(), false),
             AccountMeta::new_readonly(*treasury, true),
             AccountMeta::new(*payer, true),
-            AccountMeta::new_readonly(system_program::ID, false),
+            AccountMeta::new_readonly(SYSTEM_PROGRAM_ID, false),
             AccountMeta::new_readonly(TOKEN_PROGRAM_ID, false),
             AccountMeta::new_readonly(RENT_SYSVAR, false),
         ],
@@ -95,7 +95,7 @@ fn trade_ix(name: &str, a: u64, b: u64, treasury: &Pubkey, user: &Pubkey, user_t
             AccountMeta::new(*treasury, false),
             AccountMeta::new(*user, true),
             AccountMeta::new(*user_token, false),
-            AccountMeta::new_readonly(system_program::ID, false),
+            AccountMeta::new_readonly(SYSTEM_PROGRAM_ID, false),
             AccountMeta::new_readonly(TOKEN_PROGRAM_ID, false),
         ],
         data,
@@ -110,6 +110,21 @@ pub fn ix_sell(amount: u64, min_refund: u64, treasury: &Pubkey, user: &Pubkey, u
     trade_ix("sell", amount, min_refund, treasury, user, user_token)
 }
 
+/// `quote` e' sola lettura: nessun signer fra i suoi account, solo il payer
+/// della transazione.
+pub fn ix_quote(amount: u64) -> Instruction {
+    let mut data = ix_discriminator("quote").to_vec();
+    data.extend_from_slice(&amount.to_le_bytes());
+    Instruction {
+        program_id: PROGRAM_ID,
+        accounts: vec![
+            AccountMeta::new_readonly(state_pda(), false),
+            AccountMeta::new_readonly(mint_pda(), false),
+        ],
+        data,
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Ambiente
 // ---------------------------------------------------------------------------
@@ -117,7 +132,7 @@ pub fn ix_sell(amount: u64, min_refund: u64, treasury: &Pubkey, user: &Pubkey, u
 pub fn program_so() -> Vec<u8> {
     let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../target/deploy/autonomous_mm.so");
     std::fs::read(path).unwrap_or_else(|e| {
-        panic!("artefatto SBF mancante ({path}): esegui `cargo-build-sbf` prima dei test — {e}")
+        panic!("artefatto SBF mancante ({path}): esegui `cargo-build-sbf --arch v3` prima dei test — {e}")
     })
 }
 
@@ -130,8 +145,9 @@ pub struct Env {
 
 /// VM con il programma caricato e il deployer finanziato. Non inizializza.
 pub fn fresh() -> Env {
-    let mut svm = LiteSVM::new().with_spl_programs();
-    svm.add_program(PROGRAM_ID, &program_so());
+    let mut svm = LiteSVM::new().with_default_programs();
+    svm.add_program(PROGRAM_ID, &program_so())
+        .expect("caricamento del programma nella VM fallito");
     let deployer = deployer();
     svm.airdrop(&deployer.pubkey(), 10_000 * LAMPORTS_PER_SOL).unwrap();
     // treasury: wallet ordinario sulla curva, distinto da tutto il resto
@@ -159,6 +175,9 @@ pub fn initialized() -> Env {
 
 impl Env {
     pub fn send(&mut self, ix: Instruction, signers: &[&Keypair]) -> Result<(), String> {
+        // Due transazioni identiche hanno la stessa firma e la seconda verrebbe
+        // rifiutata come gia' processata: si fa avanzare il blockhash.
+        self.svm.expire_blockhash();
         let payer = signers[0].pubkey();
         let tx = Transaction::new_signed_with_payer(
             &[ix],
@@ -209,6 +228,37 @@ impl Env {
             )
             .unwrap();
         key
+    }
+
+    /// Come `send`, ma restituisce i metadati: return data e compute unit.
+    pub fn send_meta(
+        &mut self,
+        ix: Instruction,
+        signers: &[&Keypair],
+    ) -> Result<litesvm::types::TransactionMetadata, String> {
+        self.svm.expire_blockhash();
+        let payer = signers[0].pubkey();
+        let tx = Transaction::new_signed_with_payer(
+            &[ix],
+            Some(&payer),
+            signers,
+            self.svm.latest_blockhash(),
+        );
+        self.svm.send_transaction(tx).map_err(|e| format!("{:?}", e.err))
+    }
+
+    /// Esegue `quote` e decodifica la coppia (costo buy, rimborso sell) dai
+    /// return data Anchor: borsh di (u64, u64) = 16 byte little-endian.
+    pub fn quote(&mut self, amount: u64, payer: &Keypair) -> (u64, u64) {
+        let meta = self
+            .send_meta(ix_quote(amount), &[payer])
+            .expect("quote non deve fallire");
+        let d = &meta.return_data.data;
+        assert_eq!(d.len(), 16, "return data di quote inatteso: {} byte", d.len());
+        (
+            u64::from_le_bytes(d[0..8].try_into().unwrap()),
+            u64::from_le_bytes(d[8..16].try_into().unwrap()),
+        )
     }
 
     pub fn lamports(&self, k: &Pubkey) -> u64 {
