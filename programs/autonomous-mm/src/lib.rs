@@ -337,7 +337,10 @@ pub mod autonomous_mm {
                 from: ctx.accounts.user.to_account_info(),
                 to: ctx.accounts.vault.to_account_info(),
             }),
-            cost - cut,
+            // cut <= spread < cost per costruzione, ma la sottrazione resta
+            // controllata: se una modifica futura rompesse quella relazione,
+            // qui si otterrebbe un errore pulito invece di un abort.
+            cost.checked_sub(cut).ok_or(MmError::Overflow)?,
         )?;
         if cut > 0 {
             system_program::transfer(

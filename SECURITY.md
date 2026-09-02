@@ -99,7 +99,7 @@ nascondersi dietro lo stesso errore ripetuto nel test.
 - comportamento ai bordi e su overflow (`None`, mai panic);
 - `guard_treasury` esaustivo sui casi al contorno, incluso l'overflow del saldo.
 
-### Livello on-chain — 42 test sull'artefatto realmente deployato (litesvm)
+### Livello on-chain — 43 test sull'artefatto realmente deployato (litesvm)
 
 I test caricano **lo stesso file `.so` compilato `--arch v3` che viene poi
 deployato sul validator**. Non è un dettaglio: la prima versione di questa
@@ -306,6 +306,70 @@ negativo accettava un fallimento qualunque, e la transazione falliva davvero —
 per fondi insufficienti, il motivo sbagliato. Tutti i test negativi ora
 pretendono il codice d'errore atteso.
 
+## Verifica contro le classi di vulnerabilità note
+
+Revisione del programma contro il repertorio consolidato di errori Solana/Anchor
+(le categorie Neodyme/sec3 e i vincoli Anchor). Dove possibile la proprietà è
+stata **eseguita**, non dedotta.
+
+### Checks-Effects-Interactions
+
+Rispettato in entrambe le istruzioni, ed è visibile nell'ordine del codice.
+
+In `sell` tutti i controlli — quantità, supply, slippage, solvibilità del vault
+— precedono qualunque movimento; poi viene il **burn**, cioè l'effetto che
+revoca il diritto dell'utente; solo dopo i due trasferimenti in uscita. Se
+l'ordine fosse invertito, e se la reentrancy fosse possibile, un venditore
+potrebbe essere pagato due volte.
+
+In `buy` non esistono uscite di valore: l'utente paga, poi si minta. Il vault
+non trasferisce nulla.
+
+Va detto che su Solana la reentrancy classica non è disponibile — il runtime
+non consente a un programma di rientrare in sé stesso via CPI — quindi qui CEI
+è una cintura in più, non l'unica difesa.
+
+### Verificato presente
+
+| Classe | Stato |
+|---|---|
+| Signer mancante | `user`, `payer` e `treasury` sono `Signer` |
+| Owner/tipo non verificati | tutti gli account sono tipizzati Anchor; le due `UncheckedAccount` hanno vincoli espliciti |
+| PDA con bump non canonico | i bump sono calcolati all'init e **memorizzati** nello stato, poi imposti con `bump = state.…` |
+| Account non legati fra loro | `address = state.mint` e `address = state.treasury` |
+| Token account altrui | `token::mint = mint`, `token::authority = user` |
+| CPI verso programma arbitrario | `Program<'info, System>` e `Program<'info, Token>` verificano l'id |
+| Reinizializzazione | `init` su `state` e `mint`; la seconda chiamata fallisce |
+| Overflow aritmetico | tutte le operazioni sono `checked_*`, **e** `overflow-checks = true` nel profilo release |
+| Panic come DoS | zero `unsafe`, zero `unwrap`/`expect`/`panic!` nel corpo del programma |
+| Type cosplay | discriminator Anchor su `MarketState` |
+| Sysvar contraffatti | `Rent::get()` e `Clock::get()` via syscall, non account passati |
+| Chiusura/realloc di account | nessuna istruzione le esegue |
+| Slippage / frontrunning | guardie su entrambi i lati, verificate al lamport |
+| Manipolazione di oracoli | nessun oracolo: il prezzo dipende solo dalla supply |
+| Account duplicati mutabili | `user == treasury` misurato, non assunto benigno |
+| **Deploy a un indirizzo diverso da `declare_id!`** | **rifiutato**: `DeclaredProgramIdMismatch` (4100), verificato eseguendo |
+
+Nota sul token program: il programma è vincolato allo **SPL Token classico**.
+È una scelta che evita per costruzione le classi di problemi introdotte dalle
+estensioni Token-2022 — transfer fee e transfer hook romperebbero l'uguaglianza
+fra quanto bruciato e quanto rimborsato, su cui poggia I5.
+
+### Rilievi aperti
+
+| # | Rilievo | Gravità |
+|---|---|---|
+| R1 | il sysvar `rent` in `Initialize` non è usato: `init` di Anchor 0.31 legge il rent via syscall. Account morto nella lista, nessun rischio | cosmetico |
+| R2 | `mint` in `Trade` non usa un bump memorizzato, quindi ricalcola `find_program_address` a ogni istruzione (~1500 CU evitabili) | efficienza |
+| R3 | assente un `security.txt` on-chain (convenzione per il contatto di disclosure) | processo |
+| R4 | `initialize` non verifica che il vault sia vuoto: pre-finanziarlo crea eccedenza permanentemente bloccata. Non sfruttabile, ma i fondi sono persi | informativo |
+
+R1–R3 non sono stati modificati: cambiano l'interfaccia dell'istruzione o
+aggiungono dipendenze, e vanno decisi da chi deploya. Una sottrazione nuda
+(`cost - cut`) trovata nella stessa revisione è invece stata resa `checked_sub`:
+era dimostrabilmente sicura, ma la dimostrazione dipendeva da una relazione fra
+funzioni che una modifica futura potrebbe rompere in silenzio.
+
 ## Cosa NON è verificato
 
 1. **Nessun cluster condiviso.** Il deploy è stato provato su un
@@ -408,7 +472,7 @@ identità diverse, non per un difetto.
 ```bash
 cargo test -p autonomous-mm --lib   # 33 test matematici
 cargo-build-sbf --arch v3           # artefatto SBF (v3 obbligatorio, vedi difetto 5)
-cd integration && cargo test        # 42 test on-chain
+cd integration && cargo test        # 43 test on-chain
 ```
 
 Prova su validator reale (richiede `solana-test-validator` attivo e il

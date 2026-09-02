@@ -7,7 +7,7 @@
 Il prezzo dipende solo dalla supply.
 Nessun oracolo, nessun owner, nessuna istruzione di prelievo.
 
-[![test](https://img.shields.io/badge/test-75%20verdi-2ea44f?style=flat-square)](#verifica)
+[![test](https://img.shields.io/badge/test-76%20verdi-2ea44f?style=flat-square)](#verifica)
 [![anchor](https://img.shields.io/badge/anchor-0.31.1-512BD4?style=flat-square)](https://www.anchor-lang.com/)
 [![agave](https://img.shields.io/badge/agave-4.2-14F195?style=flat-square)](https://github.com/anza-xyz/agave)
 [![sbpf](https://img.shields.io/badge/SBPF-v3-blue?style=flat-square)](#build)
@@ -86,7 +86,7 @@ Gli invarianti `I1`–`I14` e i lemmi `L1`–`L3` sono in testa a [`programs/aut
 ```bash
 cargo test -p autonomous-mm --lib     # 33 test matematici (17 property-based)
 cargo-build-sbf --arch v3             # artefatto deployabile → target/deploy/
-cd integration && cargo test          # 42 test on-chain su litesvm
+cd integration && cargo test          # 43 test on-chain su litesvm
 ```
 
 <details>
@@ -126,7 +126,7 @@ La toolchain si installa da sola tramite il SessionStart hook in [`.claude/hooks
 <table>
 <tr>
 <td align="center"><b>33</b><br>test matematici<br><sub>17 property-based</sub></td>
-<td align="center"><b>42</b><br>test on-chain<br><sub>sull'artefatto reale</sub></td>
+<td align="center"><b>43</b><br>test on-chain<br><sub>sull'artefatto reale</sub></td>
 <td align="center"><b>19/19</b><br>mutazioni<br><sub>tutte catturate</sub></td>
 <td align="center"><b>20 123</b><br>CU nel caso peggiore<br><sub>10% del budget</sub></td>
 </tr>

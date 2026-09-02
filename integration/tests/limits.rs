@@ -384,3 +384,56 @@ fn malformed_instruction_data_never_panics() {
     assert!(executed > 0, "nessun payload ha raggiunto la logica del programma");
     assert!(executed < cases.len(), "nessun payload e' stato rifiutato");
 }
+
+// ===========================================================================
+// 5. Identità del programma
+// ===========================================================================
+
+/// Anchor rifiuta di eseguire se il programma è stato deployato a un indirizzo
+/// diverso da quello dichiarato in `declare_id!`. È la protezione contro il
+/// disallineamento fra keypair di deploy e sorgente — l'errore operativo che
+/// il gate `--features production` rende altrimenti facile commettere.
+///
+/// Verificato eseguendo: lo stesso `.so` caricato a un indirizzo arbitrario
+/// rifiuta la prima istruzione con `DeclaredProgramIdMismatch` (4100).
+#[test]
+fn the_program_refuses_to_run_at_another_address() {
+    use litesvm::LiteSVM;
+
+    let wrong_id = Pubkey::new_from_array([9u8; 32]);
+    let mut svm = LiteSVM::new().with_default_programs();
+    svm.add_program(wrong_id, &program_so()).expect("caricamento");
+
+    let d = deployer();
+    svm.airdrop(&d.pubkey(), 1_000_000_000_000).unwrap();
+    let treasury = Keypair::new();
+
+    // PDA derivate dall'indirizzo reale di deploy: la transazione è ben
+    // formata sotto ogni altro aspetto.
+    let seeds = |s: &[u8]| Pubkey::find_program_address(&[s], &wrong_id).0;
+    let ix = Instruction {
+        program_id: wrong_id,
+        accounts: vec![
+            AccountMeta::new(seeds(b"state"), false),
+            AccountMeta::new(seeds(b"mint"), false),
+            AccountMeta::new(seeds(b"vault"), false),
+            AccountMeta::new_readonly(treasury.pubkey(), true),
+            AccountMeta::new(d.pubkey(), true),
+            AccountMeta::new_readonly(SYSTEM_PROGRAM_ID, false),
+            AccountMeta::new_readonly(TOKEN_PROGRAM_ID, false),
+            AccountMeta::new_readonly(RENT_SYSVAR, false),
+        ],
+        data: ix_discriminator("initialize").to_vec(),
+    };
+    let bh = svm.latest_blockhash();
+    let tx = Transaction::new_signed_with_payer(&[ix], Some(&d.pubkey()), &[&d, &treasury], bh);
+
+    let err = svm
+        .send_transaction(tx)
+        .expect_err("un deploy a un indirizzo diverso da declare_id! deve essere rifiutato");
+    assert!(
+        format!("{:?}", err.err).contains("Custom(4100)"),
+        "atteso DeclaredProgramIdMismatch (4100), ottenuto {:?}",
+        err.err
+    );
+}
