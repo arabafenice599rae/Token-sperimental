@@ -228,12 +228,18 @@ RPC nelle righe `Program data:` con tutti i campi corretti (`is_buy`, `amount`,
 
 1. deploy → upgrade authority = deployer;
 2. `initialize`, un `buy`, un `sell` → tutto regolare;
-3. `solana program set-upgrade-authority <id> --final`;
-4. `solana program show` → `Authority: none`;
-5. nuovo `buy` e `sell` → funzionano, stessi prezzi, eventi presenti, I5 rispettato;
-6. tentativo di re-deploy → «Program is no longer upgradeable».
+3. **verificare che il program id deployato coincida con `declare_id!`** — un
+   `buy` di prova che riesce lo dimostra: se non coincidessero, il programma
+   rifiuterebbe con `DeclaredProgramIdMismatch`. Va fatto **prima** del passo
+   successivo: bruciare l'authority di un programma la cui `declare_id!` non
+   corrisponde all'indirizzo reale lo rende inutilizzabile per sempre, ed è il
+   modo più banale e più devastante di sbagliare un deploy immutabile;
+4. `solana program set-upgrade-authority <id> --final`;
+5. `solana program show` → `Authority: none`;
+6. nuovo `buy` e `sell` → funzionano, stessi prezzi, eventi presenti, I5 rispettato;
+7. tentativo di re-deploy → «Program is no longer upgradeable».
 
-Il punto 5 è quello che conta: finché il passo 3 non è eseguito, ogni invariante
+Il punto 6 è quello che conta: finché il passo 3 non è eseguito, ogni invariante
 in questo documento è una promessa revocabile dal detentore dell'authority.
 
 ### Mutation testing
@@ -355,20 +361,55 @@ Nota sul token program: il programma è vincolato allo **SPL Token classico**.
 estensioni Token-2022 — transfer fee e transfer hook romperebbero l'uguaglianza
 fra quanto bruciato e quanto rimborsato, su cui poggia I5.
 
-### Rilievi aperti
+### Rilievi chiusi in questa revisione
 
-| # | Rilievo | Gravità |
+| # | Rilievo | Esito |
 |---|---|---|
-| R1 | il sysvar `rent` in `Initialize` non è usato: `init` di Anchor 0.31 legge il rent via syscall. Account morto nella lista, nessun rischio | cosmetico |
-| R2 | `mint` in `Trade` non usa un bump memorizzato, quindi ricalcola `find_program_address` a ogni istruzione (~1500 CU evitabili) | efficienza |
-| R3 | assente un `security.txt` on-chain (convenzione per il contatto di disclosure) | processo |
-| R4 | `initialize` non verifica che il vault sia vuoto: pre-finanziarlo crea eccedenza permanentemente bloccata. Non sfruttabile, ma i fondi sono persi | informativo |
+| R1 | sysvar `rent` inutilizzato in `Initialize` | **rimosso** — `init` di Anchor 0.31 legge il rent via syscall; un account in meno per ogni inizializzazione |
+| R2 | `mint` ricalcolava `find_program_address` a ogni istruzione | **bump memorizzato** in `MarketState`: caso peggiore da 20 123 a **18 694 CU** (−7%), `quote` da 7 914 a **6 459** (−18%) |
+| R3 | nessun contatto di disclosure on-chain | **aggiunto `security_txt!`** (crate `solana-security-txt`): presente nel binario, escluso dalle build CPI |
+| — | `cost - cut`: sottrazione nuda | **`checked_sub`** — vedi sotto |
 
-R1–R3 non sono stati modificati: cambiano l'interfaccia dell'istruzione o
-aggiungono dipendenze, e vanno decisi da chi deploya. Una sottrazione nuda
-(`cost - cut`) trovata nella stessa revisione è invece stata resa `checked_sub`:
-era dimostrabilmente sicura, ma la dimostrazione dipendeva da una relazione fra
-funzioni che una modifica futura potrebbe rompere in silenzio.
+La sottrazione era sicura per un teorema (`cut ≤ spread < cost`), ma un teorema
+che vive nel **rapporto fra due funzioni separate** è una dipendenza invisibile
+a chi ne modifica una sola. `checked_sub` lo trasforma in un errore pulito se
+mai smettesse di valere. È la stessa logica dei `const assert` sui parametri
+della curva: le proprietà che stanno nelle relazioni fra le parti vanno rese
+esplicite nel codice, non lasciate ai commenti.
+
+### R4 — pre-finanziamento del vault: diagnosi e decisione
+
+Il rilievo era formulato come «eccedenza bloccata». È stato messo in
+discussione con l'ipotesi opposta — che l'eccedenza sia **revenue differito**,
+che defluisca alla treasury spread dopo spread — e la disputa è stata chiusa
+misurando, su 200 trade dopo una donazione di 2 SOL:
+
+| | eccedenza nel vault | incasso cumulato della treasury |
+|---|---:|---:|
+| dopo la donazione | 2 000 000 000 | — |
+| dopo 50 trade | 2 000 000 026 | 249 453 295 |
+| dopo 100 trade | 2 000 000 050 | 495 270 391 |
+| dopo 200 trade | 2 000 000 100 | 1 002 584 886 |
+
+La treasury ha incassato **oltre 1 SOL** in quel periodo, e la donazione è
+rimasta intatta al lamport (più 100 di dust). Non defluisce, perché
+`cut = min(spread, safe)` e **lo spread di un trade è esattamente l'eccedenza
+che quel trade crea**: prelevarlo lascia lo stock preesistente dov'è. Perché
+lo stock si muovesse servirebbe `cut > spread`, che L2 vieta.
+
+**Nessun controllo aggiuntivo in `initialize`.** Un `require!(vault vuoto)`
+sarebbe un vincolo che chiunque può far fallire con un transfer da 1 lamport
+prima del deploy: un griefing gratuito contro la propria inizializzazione, al
+prezzo di una fee. Il pre-finanziamento resta possibile e resta senza
+conseguenze sul funzionamento — costa solo al mittente.
+
+### Decisioni deliberate da non rovesciare
+
+- **SPL Token classico, non Token-2022.** Non è prudenza generica: è una
+  **precondizione di I5**. Una transfer fee o un transfer hook romperebbero
+  l'uguaglianza fra quanto viene bruciato e quanto viene rimborsato, su cui
+  poggia l'intera garanzia di solvibilità. Migrare a Token-2022 richiede di
+  rifare la dimostrazione, non solo di cambiare il program id del token.
 
 ## Cosa NON è verificato
 
@@ -466,6 +507,38 @@ program id di sviluppo. È corretto che sia così — i test verificano la
 configurazione di test — ma significa che **`cargo test` non va eseguito
 contro un artefatto compilato con `--features production`**: fallirebbe per
 identità diverse, non per un difetto.
+
+## Ancoraggio: a quale programma si riferisce questo documento
+
+Un documento di sicurezza che non dice **quale** binario descrive non descrive
+nulla: è la lezione del difetto SBPF, dove trenta test verdi si riferivano a un
+bytecode diverso da quello deployabile. Ogni revisione di questo dossier — e la
+specifica che ne discende — deve aprirsi con due valori:
+
+```
+commit    <hash git del sorgente>
+artefatto <sha256 del .so compilato --arch v3 --features production>
+```
+
+Stato al momento di questa revisione, con le **identità di test**:
+
+```
+artefatto (test)  bf0ae4152d3559d4ff4b19542cec8dc5097c9a5c11323af2196cda324a95be2f
+```
+
+Attenzione: l'hash sopra **non** sarà quello deployato. Sostituendo
+`EXPECTED_DEPLOYER` e il program id, il binario cambia e l'hash con esso — è
+esattamente il punto. L'hash da citare nella specifica va ricalcolato sulla
+build di produzione, subito prima del deploy:
+
+```bash
+cargo-build-sbf --arch v3 -- --features production
+sha256sum target/deploy/autonomous_mm.so
+solana program dump <program-id> onchain.so && sha256sum onchain.so   # dopo il deploy
+```
+
+Per un ancoraggio verificabile da terzi — che è ciò che un auditor chiederà —
+serve una build riproducibile (`solana-verify`), non ancora impostata qui.
 
 ## Riproducibilità
 

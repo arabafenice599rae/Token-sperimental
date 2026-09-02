@@ -49,6 +49,8 @@
 use anchor_lang::prelude::*;
 use anchor_lang::system_program;
 use anchor_spl::token::{self, Burn, Mint, MintTo, Token, TokenAccount};
+#[cfg(not(feature = "no-entrypoint"))]
+use solana_security_txt::security_txt;
 
 // ----------------------------------------------------------------------------
 // IDENTITA': test  vs  produzione
@@ -73,6 +75,23 @@ declare_id!("DxRXCM3egzfmcgBXYAt19xUewgnmrZ575XMwUQr8xQCG");
 
 #[cfg(feature = "production")]
 declare_id!("11111111111111111111111111111111"); // <-- SOSTITUIRE
+
+// ----------------------------------------------------------------------------
+// SECURITY.TXT — contatto per la divulgazione responsabile, leggibile on-chain
+// ----------------------------------------------------------------------------
+// Convenzione riconosciuta da explorer e ricercatori: e' la prima cosa che un
+// white-hat cerca quando trova qualcosa. Escluso dalle build CPI per non
+// finire nei binari che includono questo programma come dipendenza.
+#[cfg(not(feature = "no-entrypoint"))]
+security_txt! {
+    name: "Autonomous MM",
+    project_url: "https://github.com/arabafenice599rae/Token-sperimental",
+    contacts: "github:https://github.com/arabafenice599rae/Token-sperimental/issues",
+    policy: "https://github.com/arabafenice599rae/Token-sperimental/blob/main/SECURITY.md",
+    preferred_languages: "it,en",
+    source_code: "https://github.com/arabafenice599rae/Token-sperimental",
+    auditors: "nessun audit esterno a oggi"
+}
 
 // ----------------------------------------------------------------------------
 // PARAMETRI HARDCODED (I9)
@@ -255,6 +274,7 @@ pub struct MarketState {
     pub treasury: Pubkey, // I9: scritta una volta, mai modificabile
     pub vault_bump: u8,
     pub state_bump: u8,
+    pub mint_bump: u8, // evita di ricalcolare find_program_address a ogni trade
 }
 
 // ----------------------------------------------------------------------------
@@ -292,6 +312,7 @@ pub mod autonomous_mm {
         st.treasury = treasury;
         st.vault_bump = ctx.bumps.vault;
         st.state_bump = ctx.bumps.state;
+        st.mint_bump = ctx.bumps.mint;
         // Seed rent-exempt del vault (floor permanente, mai prelevabile).
         let seed = Rent::get()?.minimum_balance(0);
         system_program::transfer(
@@ -449,7 +470,7 @@ pub mod autonomous_mm {
 // ----------------------------------------------------------------------------
 #[derive(Accounts)]
 pub struct Initialize<'info> {
-    #[account(init, payer = payer, space = 8 + 32 + 32 + 1 + 1, seeds = [b"state"], bump)]
+    #[account(init, payer = payer, space = 8 + 32 + 32 + 1 + 1 + 1, seeds = [b"state"], bump)]
     pub state: Account<'info, MarketState>,
     #[account(init, payer = payer, mint::decimals = TOKEN_DECIMALS,
               mint::authority = state, mint::freeze_authority = state,
@@ -470,14 +491,13 @@ pub struct Initialize<'info> {
     pub payer: Signer<'info>,
     pub system_program: Program<'info, System>,
     pub token_program: Program<'info, Token>,
-    pub rent: Sysvar<'info, Rent>,
 }
 
 #[derive(Accounts)]
 pub struct Trade<'info> {
     #[account(seeds = [b"state"], bump = state.state_bump)]
     pub state: Account<'info, MarketState>,
-    #[account(mut, seeds = [b"mint"], bump, address = state.mint)]
+    #[account(mut, seeds = [b"mint"], bump = state.mint_bump, address = state.mint)]
     pub mint: Account<'info, Mint>,
     /// PDA riserva. SystemAccount: verifica owner == System Program. Non puo'
     /// mai fallire in un flusso legittimo (solo il programma puo' firmare per
@@ -504,7 +524,7 @@ pub struct Trade<'info> {
 pub struct Quote<'info> {
     #[account(seeds = [b"state"], bump = state.state_bump)]
     pub state: Account<'info, MarketState>,
-    #[account(seeds = [b"mint"], bump, address = state.mint)]
+    #[account(seeds = [b"mint"], bump = state.mint_bump, address = state.mint)]
     pub mint: Account<'info, Mint>,
 }
 

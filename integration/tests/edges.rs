@@ -241,11 +241,12 @@ fn initialize_emits_its_event_and_writes_the_expected_state() {
     // --- stato -----------------------------------------------------------
     let state = env.svm.get_account(&state_pda()).expect("stato non creato");
     assert_eq!(state.owner, PROGRAM_ID, "lo stato deve appartenere al programma");
-    assert_eq!(state.data.len(), 8 + 32 + 32 + 1 + 1, "dimensione dello stato inattesa");
+    assert_eq!(state.data.len(), 8 + 32 + 32 + 1 + 1 + 1, "dimensione dello stato inattesa");
     assert_eq!(Pubkey::try_from(&state.data[8..40]).unwrap(), mint_pda(), "mint nello stato");
     assert_eq!(Pubkey::try_from(&state.data[40..72]).unwrap(), treasury, "treasury nello stato");
     assert_eq!(state.data[72], pda(b"vault").1, "vault_bump errato");
     assert_eq!(state.data[73], pda(b"state").1, "state_bump errato");
+    assert_eq!(state.data[74], pda(b"mint").1, "mint_bump errato");
 
     // --- vault seminato al rent floor, system-owned e senza dati ----------
     let vault = env.svm.get_account(&vault_pda()).expect("vault non creato");

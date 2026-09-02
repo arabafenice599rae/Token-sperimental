@@ -421,7 +421,6 @@ fn the_program_refuses_to_run_at_another_address() {
             AccountMeta::new(d.pubkey(), true),
             AccountMeta::new_readonly(SYSTEM_PROGRAM_ID, false),
             AccountMeta::new_readonly(TOKEN_PROGRAM_ID, false),
-            AccountMeta::new_readonly(RENT_SYSVAR, false),
         ],
         data: ix_discriminator("initialize").to_vec(),
     };

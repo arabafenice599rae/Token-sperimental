@@ -76,7 +76,6 @@ pub fn ix_initialize(payer: &Pubkey, treasury: &Pubkey) -> Instruction {
             AccountMeta::new(*payer, true),
             AccountMeta::new_readonly(SYSTEM_PROGRAM_ID, false),
             AccountMeta::new_readonly(TOKEN_PROGRAM_ID, false),
-            AccountMeta::new_readonly(RENT_SYSVAR, false),
         ],
         data,
     }
