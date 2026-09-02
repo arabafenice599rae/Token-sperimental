@@ -561,24 +561,44 @@ specifica che ne discende — deve aprirsi con due valori:
 
 ```
 commit    <hash git del sorgente>
-artefatto <sha256 del .so compilato --arch v3 --features production>
+artefatto <executable hash del .so compilato --arch v3 --features production>
 ```
+
+### L'hash giusto non è `sha256sum`
+
+`sha256sum` sul file `.so` **non** produce il valore confrontabile con quello
+on-chain. L'hash canonico è quello di `solana-verify get-executable-hash`, che
+è lo sha256 del file **privato dei byte di padding a zero finali**. Sul nostro
+artefatto la differenza è di 15 byte, e i due hash non hanno nulla in comune:
+
+```
+dimensione                  260 000 byte
+padding a zero finale            15 byte
+sha256 del file intero      bf0ae415…   <- NON confrontabile con l'on-chain
+executable hash             03a07a19…   <- questo
+```
+
+Citare quello sbagliato produrrebbe una falsa discrepanza al primo confronto
+con il programma deployato — o, peggio, una verifica fatta con il metro
+sbagliato che passa per caso.
 
 Stato al momento di questa revisione, con le **identità di test**:
 
 ```
-artefatto (test)  bf0ae4152d3559d4ff4b19542cec8dc5097c9a5c11323af2196cda324a95be2f
+executable hash (test)  03a07a19df9bbd8a7e9ebf98898d23eedcfd30070856208f9a1b17164939cf3d
 ```
 
 Attenzione: l'hash sopra **non** sarà quello deployato. Sostituendo
 `EXPECTED_DEPLOYER` e il program id, il binario cambia e l'hash con esso — è
-esattamente il punto. L'hash da citare nella specifica va ricalcolato sulla
-build di produzione, subito prima del deploy:
+esattamente il punto. Va ricalcolato sulla build di produzione, subito prima
+del deploy, e confrontato dopo con quello on-chain:
 
 ```bash
 cargo-build-sbf --arch v3 -- --features production
-sha256sum target/deploy/autonomous_mm.so
-solana program dump <program-id> onchain.so && sha256sum onchain.so   # dopo il deploy
+solana-verify get-executable-hash target/deploy/autonomous_mm.so
+
+# dopo il deploy: deve coincidere
+solana-verify get-program-hash <program-id>
 ```
 
 ### Build verificabile da terzi
@@ -613,11 +633,15 @@ solana-verify verify-from-repo \
   -- --features production
 ```
 
-**Questa procedura non è stata eseguita.** L'ambiente in cui il programma è
-stato sviluppato ha il binario `docker` ma nessun daemon, quindi la build
-riproducibile non è verificabile da qui. È l'unico punto della checklist di
-deploy che resta non provato, e va eseguito su una macchina con Docker prima di
-toccare il cluster.
+`solana-verify` **è installato e funzionante** in questo ambiente (v0.5.1): i
+sottocomandi che non richiedono Docker — `get-executable-hash` fra questi —
+sono stati eseguiti, ed è così che è emersa la differenza fra i due hash
+descritta sopra.
+
+**La build riproducibile invece non è stata eseguita.** `solana-verify build`
+compila dentro un container, e qui il binario `docker` esiste ma il daemon no.
+È l'unico punto della checklist di deploy che resta non provato, e va eseguito
+su una macchina con Docker prima di toccare il cluster.
 
 ## Riproducibilità
 
