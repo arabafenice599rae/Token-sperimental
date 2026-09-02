@@ -358,17 +358,50 @@ parametri di rent del cluster, quindi il test ne riproduce l'**effetto**
 
 ## Prima del deploy in produzione
 
-- [ ] sostituire `EXPECTED_DEPLOYER` — oggi è la chiave di **test** derivata dal
-      seed `[7u8; 32]`, di cui chiunque legga questo repo possiede la privata.
-      Va fatto **prima di qualsiasi cluster condiviso, devnet inclusa**: là
-      chiunque potrebbe inizializzare il mercato al posto vostro;
-- [ ] compilare con `--arch v3`: l'artefatto di default non è deployabile;
-- [ ] sostituire il program id con quello della keypair di deploy reale;
-- [ ] decidere e documentare il destino dell'upgrade authority;
+Le due identità — program id e `EXPECTED_DEPLOYER` — vivono in un unico blocco
+in testa a `src/lib.rs`, sdoppiate per configurazione:
+
+```rust
+#[cfg(not(feature = "production"))]  // valori di TEST, privata pubblica
+#[cfg(feature = "production")]       // valori reali, da sostituire
+```
+
+Compilando con `--features production` un `const assert` **rifiuta la build**
+se una delle due è ancora il segnaposto o un valore di test. Entrambe le
+modalità di errore sono verificate: segnaposto lasciato, e valori di test
+copiati per sbaglio nel ramo di produzione. La dimenticanza più costosa del
+progetto è resa impossibile dal compilatore, non affidata a una checklist.
+
+```bash
+cargo-build-sbf --arch v3 -- --features production
+```
+
+### Sequenza
+
+- [ ] generare la keypair del programma sulla propria macchina e conservarla:
+      `solana-keygen new -o autonomous_mm-keypair.json`;
+- [ ] inserire la sua pubkey nel `declare_id!` del ramo `production` e in
+      `Anchor.toml`;
+- [ ] inserire in `EXPECTED_DEPLOYER` la pubkey del wallet che chiamerà
+      `initialize` — deve essere una chiave di cui si possiede la privata, e va
+      sostituita **prima di qualsiasi cluster condiviso, devnet inclusa**;
+- [ ] compilare con `--features production`: se la build passa, le identità
+      sono state sostituite davvero;
 - [ ] conservare in modo sicuro la keypair della treasury: le serve firmare
       `initialize`, e dopo non è più sostituibile;
 - [ ] chiamare `initialize` nella stessa transazione del deploy, o comunque
-      prima di rendere pubblico il program id.
+      prima di rendere pubblico il program id;
+- [ ] decidere e documentare il destino dell'upgrade authority — finché non è
+      bruciata, ogni invariante di questo documento è revocabile.
+
+### Nota sui test
+
+La suite di integrazione è legata alle identità di test: `integration/` firma
+come il deployer derivato dal seed `[7u8; 32]` e cerca il programma al suo
+program id di sviluppo. È corretto che sia così — i test verificano la
+configurazione di test — ma significa che **`cargo test` non va eseguito
+contro un artefatto compilato con `--features production`**: fallirebbe per
+identità diverse, non per un difetto.
 
 ## Riproducibilità
 

@@ -15,6 +15,9 @@ no-entrypoint = []
 no-idl = []
 no-log-ix-name = []
 idl-build = ["anchor-lang/idl-build", "anchor-spl/idl-build"]
+# Attiva le identita' di produzione e il const assert che vieta di spedire
+# con le chiavi di test. Vedi il blocco IDENTITA' in src/lib.rs.
+production = []
 
 [dependencies]
 anchor-lang = "0.31.1"

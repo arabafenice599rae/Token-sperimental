@@ -147,6 +147,12 @@ Difetti trovati, metodo e — soprattutto — **cosa resta non verificato**: **[
 > **Non è pronto per la produzione così com'è.**
 > `EXPECTED_DEPLOYER` contiene una chiave di test la cui privata è derivabile dal seed `[7u8; 32]` scritto in `integration/src/lib.rs`: **chiunque legga questo repo può inizializzare il mercato al posto vostro**. Va sostituita prima di qualsiasi cluster condiviso, devnet inclusa. Anche il program id appartiene a una keypair generata in sviluppo.
 
+Le due identità stanno in un unico blocco in testa a `src/lib.rs`, sdoppiate per configurazione. Compilando per la produzione un `const assert` **rifiuta la build** finché sono ancora quelle di test o i segnaposto:
+
+```bash
+cargo-build-sbf --arch v3 -- --features production
+```
+
 La checklist completa è in fondo a [`SECURITY.md`](SECURITY.md).
 
 ## Struttura

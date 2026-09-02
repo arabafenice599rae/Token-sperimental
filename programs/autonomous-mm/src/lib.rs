@@ -50,7 +50,29 @@ use anchor_lang::prelude::*;
 use anchor_lang::system_program;
 use anchor_spl::token::{self, Burn, Mint, MintTo, Token, TokenAccount};
 
+// ----------------------------------------------------------------------------
+// IDENTITA': test  vs  produzione
+// ----------------------------------------------------------------------------
+// Il deploy reale richiede DUE chiavi di cui si possiede la privata:
+//   1. il program id, cioe' la keypair passata a `solana program deploy`;
+//   2. EXPECTED_DEPLOYER, l'unico account autorizzato a chiamare initialize.
+//
+// I valori di default sono di TEST: la privata del deployer e' derivabile dal
+// seed [7u8; 32] scritto in `integration/src/lib.rs`, quindi chiunque legga
+// questo repository puo' inizializzare il mercato al posto vostro. Vanno
+// sostituiti PRIMA di qualsiasi cluster condiviso, devnet inclusa.
+//
+// Compilando con `--features production` i valori di test non sono piu'
+// accettati: il const assert in fondo a questo blocco blocca la build finche'
+// non sono stati sostituiti. Non e' possibile spedire per distrazione.
+//
+//   cargo-build-sbf --arch v3 -- --features production
+
+#[cfg(not(feature = "production"))]
 declare_id!("DxRXCM3egzfmcgBXYAt19xUewgnmrZ575XMwUQr8xQCG");
+
+#[cfg(feature = "production")]
+declare_id!("11111111111111111111111111111111"); // <-- SOSTITUIRE
 
 // ----------------------------------------------------------------------------
 // PARAMETRI HARDCODED (I9)
@@ -68,11 +90,51 @@ pub const TOKEN_DECIMALS: u8 = 6;
 /// Unico account autorizzato a chiamare `initialize`. Senza questo vincolo
 /// chiunque potrebbe invocarla per primo fra il deploy e l'init e fissare la
 /// treasury sul proprio indirizzo, in modo permanente (I9).
-///
-/// ATTENZIONE: questo e' il deployer di TEST, derivato dal seed [7u8; 32]
-/// (vedi `integration/src/lib.rs`). PRIMA DEL DEPLOY IN PRODUZIONE va
-/// sostituito con la pubkey reale del deployer.
+#[cfg(not(feature = "production"))]
 pub const EXPECTED_DEPLOYER: Pubkey = pubkey!("GmaDrppBC7P5ARKV8g3djiwP89vz1jLK23V2GBjuAEGB");
+
+#[cfg(feature = "production")]
+pub const EXPECTED_DEPLOYER: Pubkey = pubkey!("11111111111111111111111111111111"); // <-- SOSTITUIRE
+
+/// Uguaglianza fra Pubkey valutabile a compile time (`PartialEq` non e' const).
+const fn pk_eq(a: Pubkey, b: Pubkey) -> bool {
+    let (x, y) = (a.to_bytes(), b.to_bytes());
+    let mut i = 0;
+    while i < 32 {
+        if x[i] != y[i] {
+            return false;
+        }
+        i += 1;
+    }
+    true
+}
+
+// Guardia di produzione: la build fallisce se una delle due identita' e' ancora
+// un valore di test o il segnaposto. E' l'unico punto in cui la dimenticanza
+// piu' costosa di questo progetto viene resa impossibile.
+#[cfg(feature = "production")]
+const _: () = {
+    const TEST_DEPLOYER: Pubkey = pubkey!("GmaDrppBC7P5ARKV8g3djiwP89vz1jLK23V2GBjuAEGB");
+    const TEST_PROGRAM: Pubkey = pubkey!("DxRXCM3egzfmcgBXYAt19xUewgnmrZ575XMwUQr8xQCG");
+    const PLACEHOLDER: Pubkey = Pubkey::new_from_array([0u8; 32]);
+
+    assert!(
+        !pk_eq(EXPECTED_DEPLOYER, PLACEHOLDER),
+        "EXPECTED_DEPLOYER e' ancora il segnaposto: inserire la pubkey reale del deployer"
+    );
+    assert!(
+        !pk_eq(EXPECTED_DEPLOYER, TEST_DEPLOYER),
+        "EXPECTED_DEPLOYER e' ancora la chiave di TEST, la cui privata e' pubblica"
+    );
+    assert!(
+        !pk_eq(ID, PLACEHOLDER),
+        "il program id e' ancora il segnaposto: inserire quello della keypair di deploy"
+    );
+    assert!(
+        !pk_eq(ID, TEST_PROGRAM),
+        "il program id e' ancora quello di TEST, generato in sviluppo"
+    );
+};
 
 // ---- Teoremi a compile time -------------------------------------------------
 const fn n_const(s: u128) -> Option<u128> {
