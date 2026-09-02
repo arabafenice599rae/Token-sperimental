@@ -238,9 +238,12 @@ in questo documento è una promessa revocabile dal detentore dell'authority.
 
 ### Mutation testing
 
-La suite è stata validata iniettando difetti deliberati nel programma e
-verificando che i test li rilevino. Due mutazioni sono **sopravvissute al primo
-giro**, e la suite è stata rafforzata di conseguenza:
+La suite è stata validata iniettando **diciannove** difetti deliberati nel
+programma e verificando che i test li rilevino. Ogni mutazione viene applicata,
+l'artefatto SBF ricompilato, l'intera suite on-chain rieseguita e il sorgente
+ripristinato — l'harness è in `scratchpad`, non fa parte del repo.
+
+**Prima tornata** (matematica e percorsi principali):
 
 | Mutazione | Prima | Dopo |
 |---|---|---|
@@ -254,16 +257,54 @@ giro**, e la suite è stata rafforzata di conseguenza:
 | rimozione del check I8 sul rent floor | — | rilevata (1 test) |
 | rimozione del tetto `MAX_SUPPLY` da `quote` | — | rilevata (2 test) |
 
-Due ipotesi dell'autore dei test sono state **falsificate dall'esecuzione**
-mentre si scriveva questa tornata: che una donazione al vault finisse alla
-treasury al trade successivo, e che l'eccedenza sopra la curva potesse
-calare. Entrambe erano sbagliate, ed è così che si è arrivati al finding sui
-fondi bloccati. I test dicono ora ciò che il programma fa, non ciò che si
-supponeva facesse.
+**Seconda tornata**, mirata ai test aggiunti per chiudere il perimetro:
 
-La mutazione sul tetto di supply sopravviveva perché il test negativo accettava
-un fallimento qualunque, e la transazione falliva per fondi insufficienti — il
-motivo sbagliato. Tutti i test negativi ora pretendono il codice d'errore atteso.
+| Mutazione | Esito |
+|---|---|
+| `quote` senza guardia `ZeroAmount` | rilevata |
+| `freeze authority` al payer invece che alla PDA | rilevata |
+| decimali del token 6 → 9 | rilevata |
+| `initialize` non emette il suo evento | rilevata |
+| vault non seminato al rent floor | rilevata |
+| tetto di supply con fuori-di-uno (`<` invece di `<=`) | rilevata (3 test) |
+| il cut preleva tutta l'eccedenza, non solo lo spread | rilevata |
+| `ZeroAmount` in `buy` diventa un `assert!` (panic) | rilevata |
+| treasury non scritta nello stato | rilevata |
+| costo artificiale in `cost_buy` (regressione di CU) | rilevata, con riserva |
+
+L'ultima riga merita una nota, perché è il caso più istruttivo. Le prime due
+versioni di quella mutazione sono **sopravvissute**, e non perché il test fosse
+debole: il compilatore le aveva eliminate. La prima scriveva in una variabile
+poi scartata (dead store); la seconda chiamava ripetutamente `area_up` con
+argomenti costanti, e LLVM ha calcolato il valore una volta sola (CSE). Solo una
+catena con dipendenza dai dati, protetta da `black_box`, ha prodotto lavoro
+reale — e allora il guard è scattato subito: da 20 123 a **143 205 CU**, test
+rosso con il messaggio giusto.
+
+Vale la pena notare che 143 205 CU sarebbe comunque passata sotto il budget di
+default di 200 000: senza la soglia di guardia a 60 000, quella regressione
+sarebbe arrivata in produzione senza che nulla la segnalasse.
+
+## Ipotesi dell'autore falsificate dall'esecuzione
+
+Tre convinzioni di chi ha scritto i test sono state smentite eseguendole, e
+sono elencate qui perché dicono qualcosa sul grado di fiducia da accordare al
+resto del documento.
+
+1. **«Una donazione al vault finisce alla treasury al trade successivo.»**
+   Falso: la treasury ha incassato 2 500 082 lamport su 2 000 000 000 donati,
+   cioè solo lo spread di quel trade.
+2. **«Allora vi finirà a goccia, un po' per trade.»** Falso anche questo:
+   l'eccedenza non cala mai, cresce. Da qui il finding sui fondi bloccati.
+3. **«Il corpus del fuzzer copre la logica del programma.»** Falso: era fatto
+   di soli payload malformati, che Anchor rifiuta in deserializzazione prima di
+   entrare nel corpo. Aggiungendo argomenti ben formati ma degeneri il corpus
+   ha immediatamente rotto un'asserzione del test stesso, che era troppo forte.
+
+La mutazione sul tetto di supply della prima tornata sopravviveva perché il test
+negativo accettava un fallimento qualunque, e la transazione falliva davvero —
+per fondi insufficienti, il motivo sbagliato. Tutti i test negativi ora
+pretendono il codice d'errore atteso.
 
 ## Cosa NON è verificato
 

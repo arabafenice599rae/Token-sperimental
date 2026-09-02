@@ -315,6 +315,26 @@ fn malformed_instruction_data_never_panics() {
         [ix_discriminator("buy").to_vec(), vec![0xFF; 1024]].concat(), // troppo lunghi
     ];
 
+    // Argomenti BEN FORMATI ma degeneri: senza questi il corpus non entra mai
+    // nel corpo del programma, perche' Anchor rifiuta i payload malformati in
+    // deserializzazione. Sono questi a esercitare davvero la logica.
+    for disc in ["buy", "sell", "quote"] {
+        for (a, b) in [
+            (0u64, 0u64),
+            (0, u64::MAX),
+            (u64::MAX, 0),
+            (u64::MAX, u64::MAX),
+            (MAX_SUPPLY, 0),
+            (MAX_SUPPLY + 1, u64::MAX),
+            (1, 0),
+        ] {
+            let mut blob = ix_discriminator(disc).to_vec();
+            blob.extend_from_slice(&a.to_le_bytes());
+            blob.extend_from_slice(&b.to_le_bytes());
+            cases.push(blob);
+        }
+    }
+
     // più un lotto pseudo-casuale, deterministico
     let mut x: u64 = 0x5DEECE66D;
     for _ in 0..60 {
@@ -331,8 +351,8 @@ fn malformed_instruction_data_never_panics() {
         cases.push(blob);
     }
 
-    let supply_before = env.supply();
-    let vault_before = env.vault_lamports();
+    let rent_floor = env.svm.minimum_balance_for_rent_exemption(0);
+    let mut executed = 0usize;
 
     for (i, data) in cases.iter().enumerate() {
         let ix = Instruction {
@@ -340,18 +360,27 @@ fn malformed_instruction_data_never_panics() {
             accounts: accounts.clone(),
             data: data.clone(),
         };
-        if let Err(e) = env.send(ix, &[&user]) {
-            assert!(
+        match env.send(ix, &[&user]) {
+            Err(e) => assert!(
                 !e.contains("ProgramFailedToComplete"),
                 "caso {i} ({} byte) ha fatto abortire il programma: {e}",
                 data.len()
-            );
+            ),
+            // Alcuni payload ben formati sono istruzioni legittime e vengono
+            // eseguite: e' corretto che accada, purche' lo stato resti sano.
+            Ok(()) => executed += 1,
         }
-        // se invece riesce, deve essere stata un'istruzione valida per caso:
-        // lo stato viene ricontrollato sotto.
+
+        let liability = curve::v_up(env.supply() as u128) as u64;
+        assert!(
+            env.vault_lamports() >= rent_floor + liability,
+            "caso {i}: I5 violato dopo un input malformato"
+        );
+        assert!(env.supply() <= MAX_SUPPLY, "caso {i}: supply oltre il tetto");
     }
 
-    // nessun input malformato deve aver mosso valore
-    assert_eq!(env.supply(), supply_before, "la supply e' cambiata");
-    assert_eq!(env.vault_lamports(), vault_before, "il vault e' cambiato");
+    // il corpus deve contenere sia payload rifiutati sia istruzioni valide:
+    // se nessuna entrasse nel corpo del programma, il test non proverebbe nulla
+    assert!(executed > 0, "nessun payload ha raggiunto la logica del programma");
+    assert!(executed < cases.len(), "nessun payload e' stato rifiutato");
 }
