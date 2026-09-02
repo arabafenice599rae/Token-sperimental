@@ -5,7 +5,7 @@
 //! immutabilità (`set-upgrade-authority --final`) accertando che il mercato
 //! continui a funzionare dopo che l'authority è stata bruciata.
 //!
-//! Uso:  ceremony <percorso-keypair-deployer>
+//! Uso:  ceremony <percorso-keypair-deployer> [post|conc]
 //! Presuppone che il programma sia già stato deployato e il validator attivo.
 
 use autonomous_mm_integration::*;
@@ -179,14 +179,98 @@ fn post_final(c: &RpcClient, funder: &Keypair) {
     println!("\nESITO: il mercato funziona con il codice reso immutabile.");
 }
 
+
+/// Concorrenza: N acquisti inviati senza attendere la conferma dell'uno prima
+/// di spedire il successivo. Il runtime di Solana serializza le scritture sugli
+/// stessi account, quindi l'ordine di esecuzione non e' deciso da noi — ma il
+/// **totale** pagato deve comunque coincidere con la somma dei prezzi
+/// sequenziali, perche' i gradini della curva sono gli stessi in qualunque
+/// ordine vengano percorsi.
+fn concurrent(c: &RpcClient) {
+    println!("== acquisti concorrenti ==");
+    let treasury = treasury_from_state(c);
+    let n = 4usize;
+    let d = 5_000_000u64;
+
+    let supply0 = mint_supply(c);
+    let mut users = Vec::new();
+    for _ in 0..n {
+        let u = Keypair::new();
+        airdrop(c, &u.pubkey(), 200);
+        let t = create_token_account(c, &u, &u.pubkey());
+        users.push((u, t));
+    }
+
+    let balances: Vec<u64> = users.iter().map(|(u, _)| c.get_balance(&u.pubkey()).unwrap()).collect();
+
+    // tutte le transazioni firmate sullo stesso blockhash, spedite di seguito
+    let bh = c.get_latest_blockhash().unwrap();
+    let mut sigs = Vec::new();
+    for (u, t) in &users {
+        let ix = ix_buy(d, u64::MAX, &treasury, &u.pubkey(), t);
+        let tx = Transaction::new_signed_with_payer(&[ix], Some(&u.pubkey()), &[u], bh);
+        sigs.push(c.send_transaction(&tx).expect("invio"));
+    }
+    for sig in &sigs {
+        for _ in 0..120 {
+            if c.confirm_transaction(sig).unwrap_or(false) {
+                break;
+            }
+            sleep(Duration::from_millis(250));
+        }
+    }
+
+    let supply1 = mint_supply(c);
+    assert_eq!(supply1, supply0 + d * n as u64, "supply finale errata dopo i buy concorrenti");
+
+    let mut total_paid = 0u64;
+    for (i, (u, t)) in users.iter().enumerate() {
+        assert_eq!(mint_balance(c, t), d, "utente {i} non ha ricevuto i token");
+        total_paid += balances[i] - c.get_balance(&u.pubkey()).unwrap() - 5_000;
+    }
+
+    // somma dei prezzi sequenziali: identica in qualunque ordine
+    let mut expected = 0u64;
+    for i in 0..n as u64 {
+        expected += curve::cost_buy((supply0 + i * d) as u128, d as u128) as u64;
+    }
+    println!("pagato in totale : {total_paid}");
+    println!("somma sequenziale: {expected}");
+    assert_eq!(total_paid, expected, "l'ordine di esecuzione ha cambiato il prezzo complessivo");
+
+    let vault = c.get_balance(&vault_pda()).unwrap();
+    let rent_floor = c.get_minimum_balance_for_rent_exemption(0).unwrap();
+    let liability = curve::v_up(supply1 as u128) as u64;
+    assert!(vault >= rent_floor + liability, "I5 violato dopo i trade concorrenti");
+    println!("I5              : rispettato");
+    println!("\nESITO: l'ordine di esecuzione non altera il prezzo complessivo.");
+}
+
+fn mint_supply(c: &RpcClient) -> u64 {
+    let m = c.get_account(&mint_pda()).unwrap();
+    u64::from_le_bytes(m.data[36..44].try_into().unwrap())
+}
+
+fn mint_balance(c: &RpcClient, token: &Pubkey) -> u64 {
+    let a = c.get_account(token).unwrap();
+    u64::from_le_bytes(a.data[64..72].try_into().unwrap())
+}
+
 fn main() {
     let path = std::env::args().nth(1).expect("uso: ceremony <keypair-deployer> [post]");
     let deployer = read_keypair(&path);
     let c = RpcClient::new_with_commitment(RPC.to_string(), CommitmentConfig::confirmed());
 
-    if std::env::args().nth(2).as_deref() == Some("post") {
-        post_final(&c, &deployer);
-        return;
+    match std::env::args().nth(2).as_deref() {
+        Some("post") => {
+            post_final(&c, &deployer);
+            return;
+        }
+        Some("conc") => {
+            concurrent(&c);
+            return;
+        }
+        _ => {}
     }
 
     println!("== stato iniziale ==");

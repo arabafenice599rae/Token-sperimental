@@ -33,6 +33,16 @@ non ha alcuna istruzione di prelievo. Dopo `initialize`:
 - gli unici movimenti in uscita dal vault avvengono dentro `sell`, come
   funzione pura dello stato del trade.
 
+**I lamports versati al vault sono irrecuperabili.** Il cut è cappato dallo
+spread del singolo trade, e lo spread di un trade è esattamente ciò che quel
+trade aggiunge sopra la curva: il tetto `safe` in `treasury_cut` non morde mai
+in esercizio normale. La treasury incassa il **flusso**, mai lo **stock**.
+Quindi l'eccedenza sopra `rent_floor + V(S)` non cala mai — cresce di 0 o 1
+lamport per trade, per arrotondamento — e chi invia fondi al vault (per
+donazione o per errore) li perde: non tornano al mittente, non migliorano il
+prezzo dei venditori, non raggiungono la treasury. Misurato, non dedotto:
+`lamports_sent_to_the_vault_are_locked_forever`.
+
 Chi deploya conserva l'upgrade authority del programma: finché non viene
 revocata, **può sostituire il codice**. La immutabilità economica descritta
 sopra vale solo a upgrade authority bruciata. Questo è il primo punto che un
@@ -89,7 +99,7 @@ nascondersi dietro lo stesso errore ripetuto nel test.
 - comportamento ai bordi e su overflow (`None`, mai panic);
 - `guard_treasury` esaustivo sui casi al contorno, incluso l'overflow del saldo.
 
-### Livello on-chain — 32 test sull'artefatto realmente deployato (litesvm)
+### Livello on-chain — 42 test sull'artefatto realmente deployato (litesvm)
 
 I test caricano **lo stesso file `.so` compilato `--arch v3` che viene poi
 deployato sul validator**. Non è un dettaglio: la prima versione di questa
@@ -141,6 +151,60 @@ tetto non può essere applicato con un fuori-di-uno.
 Il rimborso 0 per Δ maggiore della supply resta com'era: lì il comportamento è
 già onesto, perché quella vendita non è impossibile, è semplicemente vuota.
 
+### Limiti estremi, costo e robustezza
+
+**La curva a scala piena.** Comprare l'intera supply in una sola istruzione
+calcola `N(MAX) · P0 ≈ 3,03 × 10³⁸`, l'**88% di `u128::MAX`**: è il caso
+peggiore che il `const assert` dimostra a compile time, e non era mai stato
+*eseguito* sul bytecode reale. Il test lo esegue, in un colpo unico e a passi,
+verificando I5 a ogni gradino sia in salita sia in discesa fino a supply 0.
+Passa.
+
+**Compute unit ai quattro angoli.** Misurate su artefatto reale, non in un solo
+punto comodo:
+
+| stato | buy | sell |
+| :--- | ---: | ---: |
+| supply 0, Δ = 1 | 17 237 | 17 749 |
+| supply 0, Δ = MAX | 19 414 | 19 748 |
+| supply ≈ MAX, Δ = 1 | 19 222 | 19 918 |
+| supply 5·10¹¹, Δ = 5·10¹¹ | 19 413 | **20 123** |
+| `quote` a supply alta | 7 914 | — |
+
+Massimo osservato **20 123 CU**, il 10% del budget di default. Il test fissa
+una soglia di guardia a 60 000: una modifica che triplicasse il costo cade in
+test prima che la scopra un utente.
+
+**Nessun token fuori dalla curva.** `mint authority` e `freeze authority` sono
+entrambe la PDA `state`, con 6 decimali; un `MintTo` firmato da un estraneo è
+rifiutato, e nessuno può firmare per la PDA. Se fosse possibile mintare fuori
+dal programma, si potrebbero rivendere token mai pagati svuotando il vault
+**senza violare alcun invariante interno** — è la prima domanda di un audit, e
+ora ha una risposta eseguibile.
+
+**Input malformati.** Settanta payload — vuoti, troncati, discriminator
+inesistenti, argomenti a metà, mille byte di spazzatura, e un lotto
+pseudo-casuale — devono produrre errori puliti e **mai** un
+`ProgramFailedToComplete`, che è la firma esatta del panic da `is_on_curve`
+trovato in questa campagna. Nessun input malformato muove supply o vault.
+
+### Casi al contorno
+
+- **Aliasing**: con `user == treasury` il cut è un trasferimento verso sé
+  stessi; il vault riceve e paga esattamente come in un trade normale e I5
+  regge. Lo stesso token account passato due volte nella stessa transazione
+  resta coerente.
+- **Donazioni**: vedi il modello di fiducia — restano bloccate nel vault.
+- **`initialize`**: emette `InitializeEvent` con mint e treasury corretti, e
+  scrive nello stato mint, treasury e i due bump attesi; il vault parte
+  esattamente al rent floor, system-owned e senza dati.
+- **`quote(0)`** restituisce `ZeroAmount` come `buy(0)` e `sell(0)`: I14 vale
+  ora su entrambi i limiti, quantità nulla e tetto di supply.
+- **Concorrenza** (su validator reale): quattro acquisti spediti senza
+  attendere conferma; l'ordine di esecuzione lo decide il runtime, ma il totale
+  pagato coincide **al lamport** con la somma dei prezzi sequenziali, perché i
+  gradini della curva sono gli stessi in qualunque ordine si percorrano.
+
 ### Deploy su validator reale
 
 Eseguito su `solana-test-validator` 4.2.2, con l'artefatto compilato
@@ -190,6 +254,13 @@ giro**, e la suite è stata rafforzata di conseguenza:
 | rimozione del check I8 sul rent floor | — | rilevata (1 test) |
 | rimozione del tetto `MAX_SUPPLY` da `quote` | — | rilevata (2 test) |
 
+Due ipotesi dell'autore dei test sono state **falsificate dall'esecuzione**
+mentre si scriveva questa tornata: che una donazione al vault finisse alla
+treasury al trade successivo, e che l'eccedenza sopra la curva potesse
+calare. Entrambe erano sbagliate, ed è così che si è arrivati al finding sui
+fondi bloccati. I test dicono ora ciò che il programma fa, non ciò che si
+supponeva facesse.
+
 La mutazione sul tetto di supply sopravviveva perché il test negativo accettava
 un fallimento qualunque, e la transazione falliva per fondi insufficienti — il
 motivo sbagliato. Tutti i test negativi ora pretendono il codice d'errore atteso.
@@ -200,9 +271,11 @@ motivo sbagliato. Tutti i test negativi ora pretendono il codice d'errore atteso
    `solana-test-validator` locale, a nodo singolo e senza traffico: non copre
    fee di priorità, congestione, riorganizzazioni, né il comportamento sotto
    carico concorrente.
-2. **Nessun test di concorrenza reale.** Due utenti che comprano nello stesso
-   slot non sono stati simulati; la correttezza in quel caso discende dalla
-   serializzazione delle transazioni, non da una verifica.
+2. **Concorrenza solo a nodo singolo.** Gli acquisti concorrenti sono stati
+   verificati su un `solana-test-validator` locale: l'ordine di esecuzione non
+   altera il totale pagato. Restano fuori portata i comportamenti che
+   richiedono un cluster con traffico reale — MEV, sandwich sullo slippage,
+   riorganizzazioni.
 3. **Variazione dei parametri di rent** — vedi la sezione dedicata qui sotto:
    l'effetto è analizzato e testato, ma un aumento reale del rent non è
    simulabile in litesvm, che non espone i parametri di rent del cluster.
@@ -261,7 +334,7 @@ parametri di rent del cluster, quindi il test ne riproduce l'**effetto**
 ```bash
 cargo test -p autonomous-mm --lib   # 33 test matematici
 cargo-build-sbf --arch v3           # artefatto SBF (v3 obbligatorio, vedi difetto 5)
-cd integration && cargo test        # 32 test on-chain
+cd integration && cargo test        # 42 test on-chain
 ```
 
 Prova su validator reale (richiede `solana-test-validator` attivo e il

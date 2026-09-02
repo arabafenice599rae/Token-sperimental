@@ -7,7 +7,7 @@
 Il prezzo dipende solo dalla supply.
 Nessun oracolo, nessun owner, nessuna istruzione di prelievo.
 
-[![test](https://img.shields.io/badge/test-65%20verdi-2ea44f?style=flat-square)](#verifica)
+[![test](https://img.shields.io/badge/test-75%20verdi-2ea44f?style=flat-square)](#verifica)
 [![anchor](https://img.shields.io/badge/anchor-0.31.1-512BD4?style=flat-square)](https://www.anchor-lang.com/)
 [![agave](https://img.shields.io/badge/agave-4.2-14F195?style=flat-square)](https://github.com/anza-xyz/agave)
 [![sbpf](https://img.shields.io/badge/SBPF-v3-blue?style=flat-square)](#build)
@@ -86,7 +86,7 @@ Gli invarianti `I1`–`I14` e i lemmi `L1`–`L3` sono in testa a [`programs/aut
 ```bash
 cargo test -p autonomous-mm --lib     # 33 test matematici (17 property-based)
 cargo-build-sbf --arch v3             # artefatto deployabile → target/deploy/
-cd integration && cargo test          # 32 test on-chain su litesvm
+cd integration && cargo test          # 42 test on-chain su litesvm
 ```
 
 <details>
@@ -126,15 +126,18 @@ La toolchain si installa da sola tramite il SessionStart hook in [`.claude/hooks
 <table>
 <tr>
 <td align="center"><b>33</b><br>test matematici<br><sub>17 property-based</sub></td>
-<td align="center"><b>32</b><br>test on-chain<br><sub>sull'artefatto reale</sub></td>
+<td align="center"><b>42</b><br>test on-chain<br><sub>sull'artefatto reale</sub></td>
 <td align="center"><b>9/9</b><br>mutazioni<br><sub>tutte catturate</sub></td>
-<td align="center"><b>19 397</b><br>CU per buy<br><sub>9,7% del budget</sub></td>
+<td align="center"><b>20 123</b><br>CU nel caso peggiore<br><sub>10% del budget</sub></td>
 </tr>
 </table>
 
 La suite è validata per **mutation testing**: difetti iniettati deliberatamente nel programma devono far fallire i test. Due mutazioni sono sopravvissute al primo giro e la suite è stata rafforzata finché non le ha catturate entrambe.
 
-Sul validator reale il programma consuma **19 397 CU** per un buy e **19 752** per un sell (budget di default 200 000), emette gli eventi via RPC con tutti i campi corretti, e continua a funzionare dopo che l'upgrade authority è stata bruciata.
+Il consumo peggiore misurato è **20 123 CU**, il 10% del budget di default, con la curva percorsa **a scala piena** — dove l'aritmetica tocca l'88% di `u128::MAX`. Sul validator reale gli eventi arrivano via RPC con tutti i campi corretti, quattro acquisti concorrenti pagano in totale esattamente la somma dei prezzi sequenziali, e il mercato continua a funzionare dopo che l'upgrade authority è stata bruciata.
+
+> [!NOTE]
+> **I lamports versati al vault sono irrecuperabili.** Il cut è cappato dallo spread del singolo trade, quindi la treasury incassa il flusso e mai lo stock: chi invia fondi al vault li perde. Il dettaglio è in [`SECURITY.md`](SECURITY.md).
 
 Difetti trovati, metodo e — soprattutto — **cosa resta non verificato**: **[`SECURITY.md`](SECURITY.md)**.
 
@@ -156,6 +159,8 @@ integration/                workspace separato — test sull'artefatto SBF
 ├── src/lib.rs              helper + curva di riferimento indipendente
 ├── src/bin/ceremony.rs     prova di deploy su validator reale
 ├── tests/exploits.rs       exploit, stress, solvibilità
+├── tests/limits.rs         scala piena, compute unit, autorità, input malformati
+├── tests/edges.rs          aliasing, donazioni, evento di init
 └── tests/quote.rs          coerenza preventivo ↔ settlement
 SECURITY.md                 dossier per l'audit
 ```
