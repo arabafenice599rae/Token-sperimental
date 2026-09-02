@@ -17,6 +17,14 @@ del crate `integration` deve verificare che questa proprietà regga ancora:
 `readelf -h target/deploy/autonomous_mm.so` deve riportare `CPU Version: 3`, e i
 test devono caricare quel file.
 
+**3. L'artefatto è quello di `solana-verify build`, non quello locale.** È il
+punto 2 portato fino in fondo: la toolchain di sviluppo e quella pinnata
+nell'immagine di build producono bytecode diversi, e solo il secondo è
+verificabile da terzi. La build riproducibile è stata eseguita e i suoi hash
+sono in fondo a questo documento, nella sezione **Ancoraggio**; l'immagine va
+passata a mano, perché quella che `solana-verify` sceglie da sé per questo
+`Cargo.lock` produce un ELF che il runtime attuale non carica.
+
 ---
 
 Stato della verifica del programma `autonomous-mm` al termine della campagna di
@@ -160,18 +168,18 @@ peggiore che il `const assert` dimostra a compile time, e non era mai stato
 verificando I5 a ogni gradino sia in salita sia in discesa fino a supply 0.
 Passa.
 
-**Compute unit ai quattro angoli.** Misurate su artefatto reale, non in un solo
-punto comodo:
+**Compute unit ai quattro angoli.** Misurate sull'artefatto della build
+verificabile — lo stesso che si deploya — non in un solo punto comodo:
 
 | stato | buy | sell |
 | :--- | ---: | ---: |
-| supply 0, Δ = 1 | 17 237 | 17 749 |
-| supply 0, Δ = MAX | 19 414 | 19 748 |
-| supply ≈ MAX, Δ = 1 | 19 222 | 19 918 |
-| supply 5·10¹¹, Δ = 5·10¹¹ | 19 413 | **20 123** |
-| `quote` a supply alta | 7 914 | — |
+| supply 0, Δ = 1 | 15 960 | 16 500 |
+| supply 0, Δ = MAX | 18 168 | 18 519 |
+| supply ≈ MAX, Δ = 1 | 17 966 | 18 698 |
+| supply 5·10¹¹, Δ = 5·10¹¹ | 18 167 | **18 913** |
+| `quote` a supply alta | 6 549 | — |
 
-Massimo osservato **20 123 CU**, il 10% del budget di default. Il test fissa
+Massimo osservato **18 913 CU**, il 9% del budget di default. Il test fissa
 una soglia di guardia a 60 000: una modifica che triplicasse il costo cade in
 test prima che la scopra un utente.
 
@@ -367,7 +375,7 @@ fra quanto bruciato e quanto rimborsato, su cui poggia I5.
 | # | Rilievo | Esito |
 |---|---|---|
 | R1 | sysvar `rent` inutilizzato in `Initialize` | **rimosso** — `init` di Anchor 0.31 legge il rent via syscall; un account in meno per ogni inizializzazione |
-| R2 | `mint` ricalcolava `find_program_address` a ogni istruzione | **bump memorizzato** in `MarketState`: caso peggiore da 20 123 a **18 694 CU** (−7%), `quote` da 7 914 a **6 459** (−18%) |
+| R2 | `mint` ricalcolava `find_program_address` a ogni istruzione | **bump memorizzato** in `MarketState`: caso peggiore da 20 123 a **18 694 CU** (−7%), `quote` da 7 914 a **6 459** (−18%). Misure prese a toolchain invariata, per isolare l'effetto della modifica; i valori correnti — 18 913 e 6 549 — sono quelli della build verificabile, compilata con platform-tools diversi |
 | R3 | nessun contatto di disclosure on-chain | **aggiunto `security_txt!`** (crate `solana-security-txt`): presente nel binario, escluso dalle build CPI |
 | — | `cost - cut`: sottrazione nuda | **`checked_sub`** — vedi sotto |
 
@@ -464,9 +472,10 @@ l'uguaglianza cade al primo trade.
 3. **Variazione dei parametri di rent** — vedi la sezione dedicata qui sotto:
    l'effetto è analizzato e testato, ma un aumento reale del rent non è
    simulabile in litesvm, che non espone i parametri di rent del cluster.
-4. **Costo in compute unit.** Non misurato ai bordi. `Trade` ricalcola la PDA
-   del mint a ogni istruzione (`bump` non memorizzato): funziona, ma è spesa
-   evitabile.
+4. **Costo in compute unit sotto fee di priorità.** Il consumo è misurato ai
+   quattro angoli della curva sull'artefatto deployabile, ma sempre su
+   validator scarico: quanto costi *in lamport* far passare un trade su un
+   cluster congestionato non è stato osservato.
 5. **Analisi formale.** Gli invarianti sono verificati per campionamento
    massiccio, non dimostrati.
 
@@ -517,7 +526,9 @@ copiati per sbaglio nel ramo di produzione. La dimenticanza più costosa del
 progetto è resa impossibile dal compilatore, non affidata a una checklist.
 
 ```bash
-cargo-build-sbf --arch v3 -- --features production
+solana-verify build --arch v3 --library-name autonomous_mm \
+  --base-image solanafoundation/solana-verifiable-build:4.0.3 \
+  -- --features production
 ```
 
 ### Sequenza
@@ -535,9 +546,13 @@ cargo-build-sbf --arch v3 -- --features production
       `initialize`, e dopo non è più sostituibile;
 - [ ] chiamare `initialize` nella stessa transazione del deploy, o comunque
       prima di rendere pubblico il program id;
-- [ ] eseguire la **build verificabile** con `solana-verify` e registrarla
-      pubblicamente — va fatto prima del deploy, perché dopo la finalizzazione
-      un programma immutabile senza build verificabile resta una scatola nera;
+- [ ] eseguire la **build verificabile** con `solana-verify`, passando
+      esplicitamente `--base-image solanafoundation/solana-verifiable-build:4.0.3`,
+      e registrarla pubblicamente — va fatto prima del deploy, perché dopo la
+      finalizzazione un programma immutabile senza build verificabile resta una
+      scatola nera;
+- [ ] deployare **quel** `.so`, non quello di `cargo-build-sbf`: sono binari
+      diversi, e solo il primo è verificabile;
 - [ ] verificare che l'hash on-chain (`solana-verify get-program-hash`)
       coincida con quello della build locale;
 - [ ] decidere e documentare il destino dell'upgrade authority — finché non è
@@ -572,10 +587,10 @@ on-chain. L'hash canonico è quello di `solana-verify get-executable-hash`, che
 artefatto la differenza è di 15 byte, e i due hash non hanno nulla in comune:
 
 ```
-dimensione                  260 000 byte
+dimensione                  272 680 byte
 padding a zero finale            15 byte
-sha256 del file intero      bf0ae415…   <- NON confrontabile con l'on-chain
-executable hash             03a07a19…   <- questo
+sha256 del file intero      a943e50b…   <- NON confrontabile con l'on-chain
+executable hash             b3bdedf5…   <- questo
 ```
 
 Citare quello sbagliato produrrebbe una falsa discrepanza al primo confronto
@@ -585,7 +600,12 @@ sbagliato che passa per caso.
 Stato al momento di questa revisione, con le **identità di test**:
 
 ```
-executable hash (test)  03a07a19df9bbd8a7e9ebf98898d23eedcfd30070856208f9a1b17164939cf3d
+commit dei sorgenti     6492326  (ultimo che tocca programs/, Cargo.toml, Cargo.lock)
+immagine di build       solanafoundation/solana-verifiable-build:4.0.3
+                        digest sha256:588d0c6f45c2faa4456c7b8279897d8af8c6cd17e9613bb8ddf622a820039eb2
+comando                 solana-verify build --arch v3 --library-name autonomous_mm \
+                          --base-image solanafoundation/solana-verifiable-build:4.0.3
+executable hash (test)  b3bdedf5fe6eadd7277d8ae37ef751cabc97edd415aefed3f76c10a44c373db7
 ```
 
 Attenzione: l'hash sopra **non** sarà quello deployato. Sostituendo
@@ -594,14 +614,16 @@ esattamente il punto. Va ricalcolato sulla build di produzione, subito prima
 del deploy, e confrontato dopo con quello on-chain:
 
 ```bash
-cargo-build-sbf --arch v3 -- --features production
+solana-verify build --arch v3 --library-name autonomous_mm \
+  --base-image solanafoundation/solana-verifiable-build:4.0.3 \
+  -- --features production
 solana-verify get-executable-hash target/deploy/autonomous_mm.so
 
 # dopo il deploy: deve coincidere
 solana-verify get-program-hash <program-id>
 ```
 
-### Build verificabile da terzi
+### Build verificabile da terzi — eseguita
 
 L'hash calcolato in locale prova qualcosa solo a chi lo calcola. Perché un
 auditor — o chiunque — possa verificare in autonomia che il `.so` on-chain
@@ -611,75 +633,113 @@ Docker che pinna toolchain e platform-tools.
 
 **Va fatto prima del deploy**: dopo la finalizzazione non si può più cambiare
 nulla, e un programma immutabile senza build verificabile resta per sempre una
-scatola nera.
+scatola nera. È stato fatto.
 
 ```bash
-cargo install solana-verify
+solana-verify build --arch v3 --library-name autonomous_mm \
+  --base-image solanafoundation/solana-verifiable-build:4.0.3
+```
 
-# build riproducibile — gli argomenti cargo devono essere ESATTAMENTE questi,
-# perche' --features production cambia il binario
-solana-verify build --library-name autonomous_mm -- --features production
-solana-verify get-executable-hash target/deploy/autonomous_mm.so
+Tre build indipendenti — due tramite `solana-verify` e una invocando
+direttamente `cargo-build-sbf` dentro l'immagine ufficiale non modificata,
+l'ultima partendo da `target/` cancellato — hanno prodotto lo **stesso file,
+byte per byte**:
 
-# dopo il deploy: l'hash on-chain deve coincidere
-solana-verify get-program-hash <program-id>
+```
+dimensione       272 680 byte
+sha256 del file  a943e50b96473095c34d295b87f1d45682f7ebd686b0a4a4e244f61b4b38177c
+executable hash  b3bdedf5fe6eadd7277d8ae37ef751cabc97edd415aefed3f76c10a44c373db7
+ELF              EM_BPF, e_flags 0x3 (SBPF v3)
+```
 
-# registrazione pubblica, verificabile da chiunque
+I 76 test — 33 matematici e 43 on-chain — girano su **questo** artefatto, non
+su una build locale che gli somiglia. È il punto fermo del progetto, e vale
+anche qui.
+
+Per la registrazione pubblica, dopo il deploy:
+
+```bash
 solana-verify verify-from-repo \
   --program-id <program-id> \
   --library-name autonomous_mm \
   --commit-hash <commit> \
+  --base-image solanafoundation/solana-verifiable-build:4.0.3 \
   https://github.com/arabafenice599rae/Token-sperimental \
   -- --features production
 ```
 
-`solana-verify` **è installato e funzionante** in questo ambiente (v0.5.1): i
-sottocomandi che non richiedono Docker — `get-executable-hash` fra questi —
-sono stati eseguiti, ed è così che è emersa la differenza fra i due hash
-descritta sopra.
+#### L'immagine di default non è utilizzabile: va passata a mano
 
-**La build riproducibile invece non è stata eseguita**, e la ragione è stata
-accertata fino in fondo anziché supposta.
+`solana-verify` sceglie l'immagine dal numero di versione di `solana-program`
+nel `Cargo.lock` — qui **2.2.1**. Quell'immagine compila, accetta `--arch v3`,
+e produce un artefatto **che il runtime attuale non carica**:
 
-Un primo tentativo era stato archiviato con «manca il daemon Docker». Era una
-conclusione affrettata: il daemon **si avvia** in questo ambiente (server
-29.3.1, `overlayfs`, cgroup v1) e i pull funzionano end-to-end — un'immagine da
-`mcr.microsoft.com` è stata scaricata per intero, manifest e blob. Il DNS
-risolve tutto correttamente.
+| | immagine 2.2.1 (default) | immagine 4.0.3 (usata) |
+|---|---|---|
+| toolchain | platform-tools v1.44, rustc 1.79 | platform-tools v1.53, rustc 1.89 |
+| `e_machine` | `0x107` (EM_SBF, formato vecchio) | `EM_BPF` |
+| entry point | `0x12060` | `0x100011cf0` (spazio di indirizzi v3) |
+| caricamento in litesvm 0.16 | `invalid file header` | **ok** |
 
-L'ostacolo è la **policy di egress sugli host che servono i blob**:
+`--arch v3` marca l'`e_flags`, ma non converte il formato ELF: la 2.2.1 emette
+ancora la vecchia sezione-per-sezione con rilocazioni dinamiche, che il loader
+attuale rifiuta prima di guardare i flag. Chi verifica **deve** passare
+`--base-image solanafoundation/solana-verifiable-build:4.0.3`; senza, ottiene
+un binario diverso e conclude — a torto — che il programma on-chain non
+corrisponde al sorgente.
 
-| host | esito |
-|---|---|
-| `registry-1.docker.io` | 401 — raggiungibile, serve solo il token |
-| `production.cloudfront.docker.com` | **`connect_rejected`** — blob di Docker Hub |
-| `ghcr.io` | 401 — raggiungibile |
-| `pkg-containers.githubusercontent.com` | **Forbidden** — blob di GHCR |
-| `mcr.microsoft.com` | 200, pull completo riuscito |
+Questo è anche il motivo per cui l'immagine è pinnata **per tag e per digest**
+qui sopra: il tag `master` cambia, e con lui l'hash.
 
-I registry rispondono ai manifest, ma i layer transitano da CDN separati che la
-policy non consente. `solana-verify build` cerca per default
-`solanafoundation/solana-verifiable-build`, che vive su Docker Hub.
+#### La build locale non è quella deployabile
 
-**Come sbloccarlo**, in ordine di pulizia:
+`cargo-build-sbf --arch v3` sulla macchina di sviluppo (Agave 4.2.2) produce un
+`.so` **diverso** da quello dell'immagine 4.0.3: platform-tools diversi,
+codegen diverso, hash diverso (`9689110a…` contro `b3bdedf5…`). Entrambi sono
+SBPF v3 validi e funzionanti; solo uno è verificabile da terzi.
 
-1. allowlistare **un solo host**, `production.cloudfront.docker.com`, nella
-   policy di rete dell'ambiente: è il percorso canonico e non richiede altro;
-2. in alternativa, replicare l'immagine — **pinnata per digest, non per tag**,
-   altrimenti la riproducibilità decade — su un registry i cui blob siano
-   raggiungibili, e passarla con `solana-verify build --base-image <immagine>`.
+Ne segue una regola operativa, che è il corollario del difetto 5 in cima a
+questo documento: **l'artefatto da deployare, e quello su cui girano i test, è
+quello prodotto da `solana-verify build`.** `cargo-build-sbf` resta utile per
+iterare in locale, non per spedire.
 
-È una restrizione di policy, non un limite tecnico: va riportata, non aggirata.
-Resta l'unico punto della checklist di deploy senza prova, e va eseguito
-**prima** di toccare il cluster.
+#### Nota sull'ambiente in cui è stata eseguita
+
+Due ostacoli sono stati incontrati e risolti; nessuno dei due riguarda il
+programma, ma vanno riportati perché chi ripete la procedura dietro un proxy
+li incontrerà.
+
+1. **CDN dei blob Docker.** I pull di Docker Hub scaricano i layer da
+   `production.cloudfront.docker.com`, host inizialmente non consentito dalla
+   policy di egress dell'ambiente. Il registry rispondeva ai manifest e il DNS
+   risolveva: sembrava un problema di daemon, non lo era. Allowlistato quel
+   singolo host, i pull funzionano end-to-end.
+2. **Fiducia TLS dentro il container.** Il proxy ri-termina il TLS, e
+   l'immagine ufficiale non conosce la sua CA: `cargo` fallisce su
+   `index.crates.io`. Risolto montando il bundle e puntandoci
+   `CARGO_HTTP_CAINFO` — **senza modificare l'immagine**. È infatti da lì che
+   viene la terza build della tripletta qui sopra, quella con l'immagine
+   ufficiale intatta: serve a dimostrare che il certificato aggiunto non entra
+   nel binario.
 
 ## Riproducibilità
 
 ```bash
-cargo test -p autonomous-mm --lib   # 33 test matematici
-cargo-build-sbf --arch v3           # artefatto SBF (v3 obbligatorio, vedi difetto 5)
-cd integration && cargo test        # 43 test on-chain
+cargo install solana-verify        # una volta sola
+cargo test -p autonomous-mm --lib  # 33 test matematici
+
+# artefatto deployabile e verificabile — richiede Docker
+solana-verify build --arch v3 --library-name autonomous_mm \
+  --base-image solanafoundation/solana-verifiable-build:4.0.3
+solana-verify get-executable-hash target/deploy/autonomous_mm.so
+#   atteso: b3bdedf5fe6eadd7277d8ae37ef751cabc97edd415aefed3f76c10a44c373db7
+
+cd integration && cargo test       # 43 test on-chain su quell'artefatto
 ```
+
+`cargo-build-sbf --arch v3` produce un binario valido ma **diverso** — è la
+toolchain locale, non quella pinnata — e serve solo a iterare in fretta. Ciò
+che si deploya, e ciò su cui girano i test, esce da `solana-verify build`.
 
 Prova su validator reale (richiede `solana-test-validator` attivo e il
 programma deployato):

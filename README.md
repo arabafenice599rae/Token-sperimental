@@ -11,6 +11,7 @@ Nessun oracolo, nessun owner, nessuna istruzione di prelievo.
 [![anchor](https://img.shields.io/badge/anchor-0.31.1-512BD4?style=flat-square)](https://www.anchor-lang.com/)
 [![agave](https://img.shields.io/badge/agave-4.2-14F195?style=flat-square)](https://github.com/anza-xyz/agave)
 [![sbpf](https://img.shields.io/badge/SBPF-v3-blue?style=flat-square)](#build)
+[![build](https://img.shields.io/badge/build-riproducibile-2ea44f?style=flat-square)](#build)
 [![stato](https://img.shields.io/badge/stato-non%20pronto%20per%20produzione-orange?style=flat-square)](#prima-del-deploy)
 
 </div>
@@ -18,9 +19,10 @@ Nessun oracolo, nessun owner, nessuna istruzione di prelievo.
 ---
 
 > [!IMPORTANT]
-> **Due vincoli non negoziabili.**
+> **Tre vincoli non negoziabili.**
 > 1. La build va fatta con **`--arch v3`** — SIMD-0500 vieta il deploy di SBPF v0/v1/v2, quindi l'artefatto di default viene rifiutato dal loader.
 > 2. I test devono girare sullo **stesso `.so` che si deploya**. È il corollario del punto 1, e conta di più: una suite che verifica un bytecode diverso da quello spedito non produce mai un test rosso.
+> 3. Quel `.so` è quello di **`solana-verify build`**, l'unico riproducibile da terzi — e l'immagine va passata a mano, perché quella scelta di default produce un ELF che il runtime non carica.
 >
 > Il perché, e come verificarlo, sono in cima a **[`SECURITY.md`](SECURITY.md)**.
 
@@ -85,9 +87,17 @@ Gli invarianti `I1`–`I14` e i lemmi `L1`–`L3` sono in testa a [`programs/aut
 
 ```bash
 cargo test -p autonomous-mm --lib     # 33 test matematici (17 property-based)
-cargo-build-sbf --arch v3             # artefatto deployabile → target/deploy/
-cd integration && cargo test          # 43 test on-chain su litesvm
+
+solana-verify build --arch v3 --library-name autonomous_mm \
+  --base-image solanafoundation/solana-verifiable-build:4.0.3
+                                      # artefatto deployabile → target/deploy/
+
+cd integration && cargo test          # 43 test on-chain su quell'artefatto
 ```
+
+`cargo-build-sbf --arch v3` compila molto più in fretta e va benissimo per
+iterare, ma produce un binario **diverso**: la toolchain locale non è quella
+pinnata nell'immagine. Ciò che si deploya esce da `solana-verify`.
 
 <details>
 <summary><b>Perché <code>integration/</code> è un workspace separato</b></summary>
@@ -128,13 +138,15 @@ La toolchain si installa da sola tramite il SessionStart hook in [`.claude/hooks
 <td align="center"><b>33</b><br>test matematici<br><sub>17 property-based</sub></td>
 <td align="center"><b>43</b><br>test on-chain<br><sub>sull'artefatto reale</sub></td>
 <td align="center"><b>20/20</b><br>mutazioni<br><sub>tutte catturate</sub></td>
-<td align="center"><b>18 694</b><br>CU nel caso peggiore<br><sub>9% del budget</sub></td>
+<td align="center"><b>18 913</b><br>CU nel caso peggiore<br><sub>9% del budget</sub></td>
 </tr>
 </table>
 
 La suite è validata per **mutation testing**: venti difetti iniettati deliberatamente nel programma devono far fallire i test. Due sono sopravvissute al primo giro e la suite è stata rafforzata finché non le ha catturate. Tre convinzioni di chi ha scritto i test sono state smentite dall'esecuzione — sono elencate in `SECURITY.md`, perché dicono quanto vale il resto.
 
-Il consumo peggiore misurato è **18 694 CU**, il 9% del budget di default, con la curva percorsa **a scala piena** — dove l'aritmetica tocca l'88% di `u128::MAX`. Sul validator reale gli eventi arrivano via RPC con tutti i campi corretti, quattro acquisti concorrenti pagano in totale esattamente la somma dei prezzi sequenziali, e il mercato continua a funzionare dopo che l'upgrade authority è stata bruciata.
+Il consumo peggiore misurato è **18 913 CU**, il 9% del budget di default, con la curva percorsa **a scala piena** — dove l'aritmetica tocca l'88% di `u128::MAX`. Sul validator reale gli eventi arrivano via RPC con tutti i campi corretti, quattro acquisti concorrenti pagano in totale esattamente la somma dei prezzi sequenziali, e il mercato continua a funzionare dopo che l'upgrade authority è stata bruciata.
+
+La build è **riproducibile**: tre esecuzioni indipendenti — due via `solana-verify`, una invocando direttamente l'immagine ufficiale non modificata, partendo da `target/` cancellato — producono lo stesso file byte per byte, `executable hash b3bdedf5…`. È la condizione perché un terzo possa provare che il `.so` on-chain corrisponde a questo commit, e va fatta **prima** del deploy: dopo la finalizzazione non si cambia più nulla.
 
 > [!NOTE]
 > **I lamports versati al vault sono irrecuperabili.** Il cut è cappato dallo spread del singolo trade, quindi la treasury incassa il flusso e mai lo stock: chi invia fondi al vault li perde. Il dettaglio è in [`SECURITY.md`](SECURITY.md).
