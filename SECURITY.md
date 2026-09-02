@@ -638,10 +638,29 @@ sottocomandi che non richiedono Docker — `get-executable-hash` fra questi —
 sono stati eseguiti, ed è così che è emersa la differenza fra i due hash
 descritta sopra.
 
-**La build riproducibile invece non è stata eseguita.** `solana-verify build`
-compila dentro un container, e qui il binario `docker` esiste ma il daemon no.
-È l'unico punto della checklist di deploy che resta non provato, e va eseguito
-su una macchina con Docker prima di toccare il cluster.
+**La build riproducibile invece non è stata eseguita**, e la ragione è stata
+accertata fino in fondo anziché supposta.
+
+Un primo tentativo era stato archiviato con «manca il daemon Docker». Era una
+conclusione affrettata: il daemon **si avvia** in questo ambiente (server
+29.3.1, storage `overlayfs`, cgroup v1) — non era mai stato provato. Il vero
+ostacolo è a valle:
+
+```
+registry-1.docker.io               HTTP 401   (raggiungibile: serve solo il token)
+production.cloudfront.docker.com   connect_rejected dal proxy di egress
+```
+
+Docker Hub serve i manifest, ma i **blob delle immagini** transitano da un CDN
+che la policy di rete dell'ambiente blocca. `docker pull` arriva fino al layer e
+si ferma con `Forbidden`, quindi l'immagine
+`solanafoundation/solana-verifiable-build` non è scaricabile e nemmeno
+ricostruibile in loco (servirebbe comunque un'immagine di base dallo stesso
+CDN). È una restrizione di policy, non un limite tecnico: va riportata, non
+aggirata.
+
+Resta l'unico punto della checklist di deploy senza prova, e va eseguito su una
+macchina con Docker e accesso al registry, **prima** di toccare il cluster.
 
 ## Riproducibilità
 
