@@ -127,12 +127,12 @@ La toolchain si installa da sola tramite il SessionStart hook in [`.claude/hooks
 <tr>
 <td align="center"><b>33</b><br>test matematici<br><sub>17 property-based</sub></td>
 <td align="center"><b>43</b><br>test on-chain<br><sub>sull'artefatto reale</sub></td>
-<td align="center"><b>19/19</b><br>mutazioni<br><sub>tutte catturate</sub></td>
+<td align="center"><b>20/20</b><br>mutazioni<br><sub>tutte catturate</sub></td>
 <td align="center"><b>18 694</b><br>CU nel caso peggiore<br><sub>9% del budget</sub></td>
 </tr>
 </table>
 
-La suite è validata per **mutation testing**: diciannove difetti iniettati deliberatamente nel programma devono far fallire i test. Due sono sopravvissute al primo giro e la suite è stata rafforzata finché non le ha catturate. Tre convinzioni di chi ha scritto i test sono state smentite dall'esecuzione — sono elencate in `SECURITY.md`, perché dicono quanto vale il resto.
+La suite è validata per **mutation testing**: venti difetti iniettati deliberatamente nel programma devono far fallire i test. Due sono sopravvissute al primo giro e la suite è stata rafforzata finché non le ha catturate. Tre convinzioni di chi ha scritto i test sono state smentite dall'esecuzione — sono elencate in `SECURITY.md`, perché dicono quanto vale il resto.
 
 Il consumo peggiore misurato è **18 694 CU**, il 9% del budget di default, con la curva percorsa **a scala piena** — dove l'aritmetica tocca l'88% di `u128::MAX`. Sul validator reale gli eventi arrivano via RPC con tutti i campi corretti, quattro acquisti concorrenti pagano in totale esattamente la somma dei prezzi sequenziali, e il mercato continua a funzionare dopo che l'upgrade authority è stata bruciata.
 

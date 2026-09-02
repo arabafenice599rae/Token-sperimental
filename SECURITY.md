@@ -244,7 +244,7 @@ in questo documento è una promessa revocabile dal detentore dell'authority.
 
 ### Mutation testing
 
-La suite è stata validata iniettando **diciannove** difetti deliberati nel
+La suite è stata validata iniettando **venti** difetti deliberati nel
 programma e verificando che i test li rilevino. Ogni mutazione viene applicata,
 l'artefatto SBF ricompilato, l'intera suite on-chain rieseguita e il sorgente
 ripristinato — l'harness è in `scratchpad`, non fa parte del repo.
@@ -277,6 +277,7 @@ ripristinato — l'harness è in `scratchpad`, non fa parte del repo.
 | `ZeroAmount` in `buy` diventa un `assert!` (panic) | rilevata |
 | treasury non scritta nello stato | rilevata |
 | costo artificiale in `cost_buy` (regressione di CU) | rilevata, con riserva |
+| `cut = spread − 1` (dentro la vecchia tolleranza) | rilevata **solo** dopo il passaggio all'uguaglianza esatta |
 
 L'ultima riga merita una nota, perché è il caso più istruttivo. Le prime due
 versioni di quella mutazione sono **sopravvissute**, e non perché il test fosse
@@ -403,6 +404,44 @@ prima del deploy: un griefing gratuito contro la propria inizializzazione, al
 prezzo di una fee. Il pre-finanziamento resta possibile e resta senza
 conseguenze sul funzionamento — costa solo al mittente.
 
+### `cut = min(spread, safe)` — decisione, con la misura che la sostiene
+
+È stata valutata l'alternativa `cut = safe`: la treasury preleva tutta
+l'eccedenza invece del solo spread, così le donazioni diventerebbero revenue
+differito anziché capitale morto. I5 resterebbe identico e il vault finirebbe
+esattamente a `rent_floor + V_up(S_post)`.
+
+Applicata e misurata, **rompe il lato acquisto**. In `sell` il cut esce dal
+vault, che per definizione di `safe` ha i fondi; in `buy` esce dalla **tasca
+dell'utente**, e `cost − cut` va in underflow non appena `safe > cost`. Con
+100 SOL di eccedenza nel vault, un acquisto da 100 506 lamport viene rifiutato
+con `Overflow`:
+
+```
+eccedenza nel vault : 100 000 000 000
+costo del buy       :         100 506
+ESITO buy  : FALLITO -> InstructionError(0, Custom(6002))
+ESITO sell : RIUSCITO
+```
+
+Peggio: chiunque potrebbe donare 1 SOL al vault e **bloccare tutti gli
+acquisti** sotto quella cifra fino alla prima vendita — lo stesso griefing che
+sconsiglia un `require!(vault vuoto)`, ma con un bersaglio più grande. Una
+versione corretta richiederebbe `cut = min(safe, cost)` in `buy` e `cut = safe`
+in `sell`: un'asimmetria fra le due istruzioni, e una nuova dipendenza
+invisibile — chi togliesse quel `min` in futuro romperebbe gli acquisti.
+
+Il beneficio era cosmetico (una riga meno brutta nel dossier); il costo è
+superficie d'attacco reale. Si resta su `min(spread, safe)`.
+
+Il beneficio *collaterale* di quella proposta è però stato adottato: il test
+sulle donazioni verificava disuguaglianze (`l'eccedenza non cala, cresce al più
+di 2`), e ora verifica un'**uguaglianza esatta** — l'eccedenza dopo ogni trade
+è prevista al lamport dalla curva di riferimento. Vale quanto sostenuto: le
+uguaglianze catturano ciò che le disuguaglianze perdonano. La mutazione
+`cut = spread − 1` stava dentro la vecchia tolleranza e passava; con
+l'uguaglianza cade al primo trade.
+
 ### Decisioni deliberate da non rovesciare
 
 - **SPL Token classico, non Token-2022.** Non è prudenza generica: è una
@@ -496,6 +535,11 @@ cargo-build-sbf --arch v3 -- --features production
       `initialize`, e dopo non è più sostituibile;
 - [ ] chiamare `initialize` nella stessa transazione del deploy, o comunque
       prima di rendere pubblico il program id;
+- [ ] eseguire la **build verificabile** con `solana-verify` e registrarla
+      pubblicamente — va fatto prima del deploy, perché dopo la finalizzazione
+      un programma immutabile senza build verificabile resta una scatola nera;
+- [ ] verificare che l'hash on-chain (`solana-verify get-program-hash`)
+      coincida con quello della build locale;
 - [ ] decidere e documentare il destino dell'upgrade authority — finché non è
       bruciata, ogni invariante di questo documento è revocabile.
 
@@ -537,8 +581,43 @@ sha256sum target/deploy/autonomous_mm.so
 solana program dump <program-id> onchain.so && sha256sum onchain.so   # dopo il deploy
 ```
 
-Per un ancoraggio verificabile da terzi — che è ciò che un auditor chiederà —
-serve una build riproducibile (`solana-verify`), non ancora impostata qui.
+### Build verificabile da terzi
+
+L'hash calcolato in locale prova qualcosa solo a chi lo calcola. Perché un
+auditor — o chiunque — possa verificare in autonomia che il `.so` on-chain
+corrisponde a questo commit, serve una build riproducibile. Lo strumento è
+`solana-verify` (Solana Foundation / OtterSec), che compila dentro un'immagine
+Docker che pinna toolchain e platform-tools.
+
+**Va fatto prima del deploy**: dopo la finalizzazione non si può più cambiare
+nulla, e un programma immutabile senza build verificabile resta per sempre una
+scatola nera.
+
+```bash
+cargo install solana-verify
+
+# build riproducibile — gli argomenti cargo devono essere ESATTAMENTE questi,
+# perche' --features production cambia il binario
+solana-verify build --library-name autonomous_mm -- --features production
+solana-verify get-executable-hash target/deploy/autonomous_mm.so
+
+# dopo il deploy: l'hash on-chain deve coincidere
+solana-verify get-program-hash <program-id>
+
+# registrazione pubblica, verificabile da chiunque
+solana-verify verify-from-repo \
+  --program-id <program-id> \
+  --library-name autonomous_mm \
+  --commit-hash <commit> \
+  https://github.com/arabafenice599rae/Token-sperimental \
+  -- --features production
+```
+
+**Questa procedura non è stata eseguita.** L'ambiente in cui il programma è
+stato sviluppato ha il binario `docker` ma nessun daemon, quindi la build
+riproducibile non è verificabile da qui. È l'unico punto della checklist di
+deploy che resta non provato, e va eseguito su una macchina con Docker prima di
+toccare il cluster.
 
 ## Riproducibilità
 

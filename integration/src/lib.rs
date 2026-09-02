@@ -371,4 +371,13 @@ pub mod curve {
     pub fn v_up(s: u128) -> u128 {
         div_ceil(n(s) * P0, DEN)
     }
+    /// Area [s, s+d] per eccesso: quanto il vault incassa in un BUY, al netto
+    /// dello spread che va alla treasury.
+    pub fn area_up(s: u128, d: u128) -> u128 {
+        div_ceil((n(s + d) - n(s)) * P0, DEN)
+    }
+    /// Area [s, s+d] per difetto: base del rimborso in un SELL.
+    pub fn area_down(s: u128, d: u128) -> u128 {
+        ((n(s + d) - n(s)) * P0) / DEN
+    }
 }

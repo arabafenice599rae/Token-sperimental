@@ -166,7 +166,12 @@ fn lamports_sent_to_the_vault_are_locked_forever() {
         "la treasury ha attinto alla donazione: {gained} su {donation}"
     );
 
-    // --- e l'eccedenza non cala mai, su nessun tipo di trade --------------
+    // --- l'eccedenza evolve in modo ESATTAMENTE prevedibile ---------------
+    // Non ci si limita a "non cala": si predice il valore al lamport. Su un
+    // BUY il vault incassa `area_up` e la liability cresce di `ΔV_up`; su un
+    // SELL la liability cala di `ΔV_up` e il vault paga `area_down`. La
+    // differenza e' l'unica cosa che muove l'eccedenza, ed e' l'arrotondamento.
+    // Un'uguaglianza cattura mutazioni che una disuguaglianza perdona.
     let mut previous = excess(&env);
     assert!(previous >= donation, "la donazione deve essere ancora nel vault");
 
@@ -177,26 +182,28 @@ fn lamports_sent_to_the_vault_are_locked_forever() {
         x ^= x << 17;
         let amount = (x % 5_000_000) + 1;
         let held = env.token_balance(&token);
-        let r = if x & 1 == 0 {
+        let s0 = env.supply() as u128;
+
+        let predicted = if x & 1 == 0 {
+            let d = amount as u128;
             env.send(ix_buy(amount, u64::MAX, &treasury, &user.pubkey(), &token), &[&user])
+                .unwrap_or_else(|e| panic!("trade {i}: {e}"));
+            previous as u128 + curve::area_up(s0, d) - (curve::v_up(s0 + d) - curve::v_up(s0))
         } else if held > 0 {
-            env.send(ix_sell(amount.min(held), 0, &treasury, &user.pubkey(), &token), &[&user])
+            let d = amount.min(held) as u128;
+            env.send(ix_sell(d as u64, 0, &treasury, &user.pubkey(), &token), &[&user])
+                .unwrap_or_else(|e| panic!("trade {i}: {e}"));
+            previous as u128 + (curve::v_up(s0) - curve::v_up(s0 - d)) - curve::area_down(s0 - d, d)
         } else {
             continue;
         };
-        r.unwrap_or_else(|e| panic!("trade {i}: {e}"));
 
-        let now = excess(&env);
-        assert!(
-            now >= previous,
-            "trade {i}: l'eccedenza e' calata da {previous} a {now} — il cut ha attinto allo stock"
+        let now = excess(&env) as u128;
+        assert_eq!(
+            now, predicted,
+            "trade {i}: eccedenza {now}, prevista {predicted} — il cut non ha preso esattamente lo spread"
         );
-        assert!(
-            now <= previous + 2,
-            "trade {i}: l'eccedenza e' cresciuta di {} lamports, oltre l'arrotondamento",
-            now - previous
-        );
-        previous = now;
+        previous = now as u64;
         assert!(
             env.vault_lamports() >= rent_floor + curve::v_up(env.supply() as u128) as u64,
             "I5 violato al trade {i}"
