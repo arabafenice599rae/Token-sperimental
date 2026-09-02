@@ -34,7 +34,13 @@
 //      stato della treasury: se non è (system-owned ∧ 0 dati ∧ rent-exempt
 //      post-cut) il cut è 0 e resta nel vault. Verificato a ogni trade.
 //  I12 la treasury è un indirizzo sulla curva ed25519 (non PDA di alcun
-//      programma) e distinto da vault/state/mint/programmi.
+//      programma) e distinto da vault/state/mint/programmi. Provato
+//      facendole firmare initialize: una PDA non può produrre una firma.
+//  I13 solo EXPECTED_DEPLOYER può chiamare initialize: senza questo vincolo
+//      chiunque potrebbe anticipare il deployer e fissarsi come treasury.
+//  I14 `quote` rispetta gli stessi limiti di `buy`/`sell` — quantita' nulla e
+//      tetto di supply — quindi non preventiva mai un trade che il settlement
+//      rifiuterebbe. Vista e regolamento coincidono.
 //
 // ROUNDING DIREZIONALE: BUY ceil, SELL floor, V(S) per il check di
 // solvibilità ceil (liability sovrastimata), cut floor.
@@ -43,8 +49,49 @@
 use anchor_lang::prelude::*;
 use anchor_lang::system_program;
 use anchor_spl::token::{self, Burn, Mint, MintTo, Token, TokenAccount};
+#[cfg(not(feature = "no-entrypoint"))]
+use solana_security_txt::security_txt;
 
+// ----------------------------------------------------------------------------
+// IDENTITA': test  vs  produzione
+// ----------------------------------------------------------------------------
+// Il deploy reale richiede DUE chiavi di cui si possiede la privata:
+//   1. il program id, cioe' la keypair passata a `solana program deploy`;
+//   2. EXPECTED_DEPLOYER, l'unico account autorizzato a chiamare initialize.
+//
+// I valori di default sono di TEST: la privata del deployer e' derivabile dal
+// seed [7u8; 32] scritto in `integration/src/lib.rs`, quindi chiunque legga
+// questo repository puo' inizializzare il mercato al posto vostro. Vanno
+// sostituiti PRIMA di qualsiasi cluster condiviso, devnet inclusa.
+//
+// Compilando con `--features production` i valori di test non sono piu'
+// accettati: il const assert in fondo a questo blocco blocca la build finche'
+// non sono stati sostituiti. Non e' possibile spedire per distrazione.
+//
+//   cargo-build-sbf --arch v3 -- --features production
+
+#[cfg(not(feature = "production"))]
 declare_id!("DxRXCM3egzfmcgBXYAt19xUewgnmrZ575XMwUQr8xQCG");
+
+#[cfg(feature = "production")]
+declare_id!("11111111111111111111111111111111"); // <-- SOSTITUIRE
+
+// ----------------------------------------------------------------------------
+// SECURITY.TXT — contatto per la divulgazione responsabile, leggibile on-chain
+// ----------------------------------------------------------------------------
+// Convenzione riconosciuta da explorer e ricercatori: e' la prima cosa che un
+// white-hat cerca quando trova qualcosa. Escluso dalle build CPI per non
+// finire nei binari che includono questo programma come dipendenza.
+#[cfg(not(feature = "no-entrypoint"))]
+security_txt! {
+    name: "Autonomous MM",
+    project_url: "https://github.com/arabafenice599rae/Token-sperimental",
+    contacts: "github:https://github.com/arabafenice599rae/Token-sperimental/issues",
+    policy: "https://github.com/arabafenice599rae/Token-sperimental/blob/main/SECURITY.md",
+    preferred_languages: "it,en",
+    source_code: "https://github.com/arabafenice599rae/Token-sperimental",
+    auditors: "nessun audit esterno a oggi"
+}
 
 // ----------------------------------------------------------------------------
 // PARAMETRI HARDCODED (I9)
@@ -58,6 +105,55 @@ pub const HALF_DEN: u128 = 20_000; // x*(20000±PHI_BPS)/20000 = x*(1±φ/2)
 pub const BPS: u128 = 10_000;
 pub const DEN: u128 = P0_DEN * 3 * S0 * S0; // costante, calcolata a compile time
 pub const TOKEN_DECIMALS: u8 = 6;
+
+/// Unico account autorizzato a chiamare `initialize`. Senza questo vincolo
+/// chiunque potrebbe invocarla per primo fra il deploy e l'init e fissare la
+/// treasury sul proprio indirizzo, in modo permanente (I9).
+#[cfg(not(feature = "production"))]
+pub const EXPECTED_DEPLOYER: Pubkey = pubkey!("GmaDrppBC7P5ARKV8g3djiwP89vz1jLK23V2GBjuAEGB");
+
+#[cfg(feature = "production")]
+pub const EXPECTED_DEPLOYER: Pubkey = pubkey!("11111111111111111111111111111111"); // <-- SOSTITUIRE
+
+/// Uguaglianza fra Pubkey valutabile a compile time (`PartialEq` non e' const).
+const fn pk_eq(a: Pubkey, b: Pubkey) -> bool {
+    let (x, y) = (a.to_bytes(), b.to_bytes());
+    let mut i = 0;
+    while i < 32 {
+        if x[i] != y[i] {
+            return false;
+        }
+        i += 1;
+    }
+    true
+}
+
+// Guardia di produzione: la build fallisce se una delle due identita' e' ancora
+// un valore di test o il segnaposto. E' l'unico punto in cui la dimenticanza
+// piu' costosa di questo progetto viene resa impossibile.
+#[cfg(feature = "production")]
+const _: () = {
+    const TEST_DEPLOYER: Pubkey = pubkey!("GmaDrppBC7P5ARKV8g3djiwP89vz1jLK23V2GBjuAEGB");
+    const TEST_PROGRAM: Pubkey = pubkey!("DxRXCM3egzfmcgBXYAt19xUewgnmrZ575XMwUQr8xQCG");
+    const PLACEHOLDER: Pubkey = Pubkey::new_from_array([0u8; 32]);
+
+    assert!(
+        !pk_eq(EXPECTED_DEPLOYER, PLACEHOLDER),
+        "EXPECTED_DEPLOYER e' ancora il segnaposto: inserire la pubkey reale del deployer"
+    );
+    assert!(
+        !pk_eq(EXPECTED_DEPLOYER, TEST_DEPLOYER),
+        "EXPECTED_DEPLOYER e' ancora la chiave di TEST, la cui privata e' pubblica"
+    );
+    assert!(
+        !pk_eq(ID, PLACEHOLDER),
+        "il program id e' ancora il segnaposto: inserire quello della keypair di deploy"
+    );
+    assert!(
+        !pk_eq(ID, TEST_PROGRAM),
+        "il program id e' ancora quello di TEST, generato in sviluppo"
+    );
+};
 
 // ---- Teoremi a compile time -------------------------------------------------
 const fn n_const(s: u128) -> Option<u128> {
@@ -94,6 +190,7 @@ pub enum MmError {
     #[msg("riserva insufficiente")] InsufficientReserve,
     #[msg("supply insufficiente per la vendita")] InsufficientSupply,
     #[msg("treasury non valida (PDA, o account del protocollo)")] InvalidTreasury,
+    #[msg("chiamante non autorizzato")] Unauthorized,
 }
 
 #[event]
@@ -177,6 +274,7 @@ pub struct MarketState {
     pub treasury: Pubkey, // I9: scritta una volta, mai modificabile
     pub vault_bump: u8,
     pub state_bump: u8,
+    pub mint_bump: u8, // evita di ricalcolare find_program_address a ogni trade
 }
 
 // ----------------------------------------------------------------------------
@@ -186,10 +284,22 @@ pub struct MarketState {
 pub mod autonomous_mm {
     use super::*;
 
-    pub fn initialize(ctx: Context<Initialize>, treasury: Pubkey) -> Result<()> {
-        // I12: sulla curva ⇒ non e' PDA di nessun programma; e non e' un
-        // account del protocollo o un programma.
-        require!(treasury.is_on_curve(), MmError::InvalidTreasury);
+    pub fn initialize(ctx: Context<Initialize>) -> Result<()> {
+        // I13: solo il deployer previsto puo' inizializzare. Chiude la finestra
+        // di front-running fra deploy e init.
+        require_keys_eq!(
+            ctx.accounts.payer.key(),
+            EXPECTED_DEPLOYER,
+            MmError::Unauthorized
+        );
+        // I12: la treasury deve FIRMARE. Una firma ed25519 valida prova il
+        // possesso della chiave privata, quindi che l'indirizzo sta sulla
+        // curva, quindi che non e' la PDA di nessun programma.
+        //
+        // NOTA: `Pubkey::is_on_curve()` NON e' utilizzabile qui — sotto
+        // target_os="solana" il suo corpo e' `unimplemented!()` e farebbe
+        // panicare il programma on-chain.
+        let treasury = ctx.accounts.treasury.key();
         require!(treasury != ctx.accounts.vault.key(), MmError::InvalidTreasury);
         require!(treasury != ctx.accounts.state.key(), MmError::InvalidTreasury);
         require!(treasury != ctx.accounts.mint.key(), MmError::InvalidTreasury);
@@ -202,6 +312,7 @@ pub mod autonomous_mm {
         st.treasury = treasury;
         st.vault_bump = ctx.bumps.vault;
         st.state_bump = ctx.bumps.state;
+        st.mint_bump = ctx.bumps.mint;
         // Seed rent-exempt del vault (floor permanente, mai prelevabile).
         let seed = Rent::get()?.minimum_balance(0);
         system_program::transfer(
@@ -247,7 +358,10 @@ pub mod autonomous_mm {
                 from: ctx.accounts.user.to_account_info(),
                 to: ctx.accounts.vault.to_account_info(),
             }),
-            cost - cut,
+            // cut <= spread < cost per costruzione, ma la sottrazione resta
+            // controllata: se una modifica futura rompesse quella relazione,
+            // qui si otterrebbe un errore pulito invece di un abort.
+            cost.checked_sub(cut).ok_or(MmError::Overflow)?,
         )?;
         if cut > 0 {
             system_program::transfer(
@@ -332,8 +446,16 @@ pub mod autonomous_mm {
     }
 
     /// Quote read-only: (costo buy, rimborso sell) per `amount`.
+    ///
+    /// I14: il preventivo rispetta gli stessi limiti del settlement. Preventivare
+    /// un acquisto che `buy` rifiuterebbe sarebbe informazione falsa, e i
+    /// frontend si fidano del preventivo: e' il suo scopo.
     pub fn quote(ctx: Context<Quote>, amount: u64) -> Result<(u64, u64)> {
-        let s = ctx.accounts.mint.supply as u128;
+        require!(amount > 0, MmError::ZeroAmount); // I14, come in buy/sell
+        let supply = ctx.accounts.mint.supply;
+        let s_post = supply.checked_add(amount).ok_or(MmError::Overflow)?;
+        require!(s_post <= MAX_SUPPLY, MmError::MaxSupplyExceeded); // I1, come in buy
+        let s = supply as u128;
         let (c, _) = cost_buy(s, amount as u128).ok_or(MmError::Overflow)?;
         let r = if (amount as u128) <= s {
             refund_sell(s - amount as u128, amount as u128).ok_or(MmError::Overflow)?.0
@@ -348,7 +470,7 @@ pub mod autonomous_mm {
 // ----------------------------------------------------------------------------
 #[derive(Accounts)]
 pub struct Initialize<'info> {
-    #[account(init, payer = payer, space = 8 + 32 + 32 + 1 + 1, seeds = [b"state"], bump)]
+    #[account(init, payer = payer, space = 8 + 32 + 32 + 1 + 1 + 1, seeds = [b"state"], bump)]
     pub state: Account<'info, MarketState>,
     #[account(init, payer = payer, mint::decimals = TOKEN_DECIMALS,
               mint::authority = state, mint::freeze_authority = state,
@@ -361,18 +483,21 @@ pub struct Initialize<'info> {
     /// impossibile la manipolazione diretta dei lamports da parte del programma.
     #[account(mut, seeds = [b"vault"], bump)]
     pub vault: UncheckedAccount<'info>,
+    /// La treasury firma l'init: e' l'unico modo on-chain di dimostrare che
+    /// l'indirizzo sta sulla curva ed25519 (I12). Non riceve e non paga nulla
+    /// in questa istruzione.
+    pub treasury: Signer<'info>,
     #[account(mut)]
     pub payer: Signer<'info>,
     pub system_program: Program<'info, System>,
     pub token_program: Program<'info, Token>,
-    pub rent: Sysvar<'info, Rent>,
 }
 
 #[derive(Accounts)]
 pub struct Trade<'info> {
     #[account(seeds = [b"state"], bump = state.state_bump)]
     pub state: Account<'info, MarketState>,
-    #[account(mut, seeds = [b"mint"], bump, address = state.mint)]
+    #[account(mut, seeds = [b"mint"], bump = state.mint_bump, address = state.mint)]
     pub mint: Account<'info, Mint>,
     /// PDA riserva. SystemAccount: verifica owner == System Program. Non puo'
     /// mai fallire in un flusso legittimo (solo il programma puo' firmare per
@@ -399,9 +524,12 @@ pub struct Trade<'info> {
 pub struct Quote<'info> {
     #[account(seeds = [b"state"], bump = state.state_bump)]
     pub state: Account<'info, MarketState>,
-    #[account(seeds = [b"mint"], bump, address = state.mint)]
+    #[account(seeds = [b"mint"], bump = state.mint_bump, address = state.mint)]
     pub mint: Account<'info, Mint>,
 }
+
+#[cfg(test)]
+mod tests_math;
 
 // ============================================================================
 // TEST DELLE PROPRIETÀ (matematica pura)

@@ -1,0 +1,35 @@
+# Workspace a se stante: isola litesvm/solana-sdk dalle dipendenze di Anchor,
+# che altrimenti si unificherebbero e romperebbero la build SBF.
+[workspace]
+
+[package]
+name = "autonomous-mm-integration"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# Crate di soli test: carica l'artefatto SBF compilato in una VM in-process.
+# Non dipende dal crate del programma, così la coppia litesvm/solana-sdk resta
+# libera di evolvere senza dover combaciare con le dipendenze di Anchor.
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+litesvm = "0.16.0"
+solana-sdk = "=4.0.1"
+solana-system-interface = "2"
+solana-commitment-config = "3"
+solana-transaction-status-client-types = "4"
+solana-sdk-ids = "3"
+sha2 = "0.10"
+# five8_core 0.1.x e' no_std e senza la feature "std" non implementa Error,
+# il che rompe solana-keypair 3.1.2. Va abilitata esplicitamente.
+five8_core = { version = "0.1.2", features = ["std"] }
+solana-client = "4.1"
+solana-transaction-status = "4.1"
+serde_json = "1"
+base64 = "0.22"
+
+[dev-dependencies]
+proptest = "1.11.0"
