@@ -643,24 +643,35 @@ accertata fino in fondo anziché supposta.
 
 Un primo tentativo era stato archiviato con «manca il daemon Docker». Era una
 conclusione affrettata: il daemon **si avvia** in questo ambiente (server
-29.3.1, storage `overlayfs`, cgroup v1) — non era mai stato provato. Il vero
-ostacolo è a valle:
+29.3.1, `overlayfs`, cgroup v1) e i pull funzionano end-to-end — un'immagine da
+`mcr.microsoft.com` è stata scaricata per intero, manifest e blob. Il DNS
+risolve tutto correttamente.
 
-```
-registry-1.docker.io               HTTP 401   (raggiungibile: serve solo il token)
-production.cloudfront.docker.com   connect_rejected dal proxy di egress
-```
+L'ostacolo è la **policy di egress sugli host che servono i blob**:
 
-Docker Hub serve i manifest, ma i **blob delle immagini** transitano da un CDN
-che la policy di rete dell'ambiente blocca. `docker pull` arriva fino al layer e
-si ferma con `Forbidden`, quindi l'immagine
-`solanafoundation/solana-verifiable-build` non è scaricabile e nemmeno
-ricostruibile in loco (servirebbe comunque un'immagine di base dallo stesso
-CDN). È una restrizione di policy, non un limite tecnico: va riportata, non
-aggirata.
+| host | esito |
+|---|---|
+| `registry-1.docker.io` | 401 — raggiungibile, serve solo il token |
+| `production.cloudfront.docker.com` | **`connect_rejected`** — blob di Docker Hub |
+| `ghcr.io` | 401 — raggiungibile |
+| `pkg-containers.githubusercontent.com` | **Forbidden** — blob di GHCR |
+| `mcr.microsoft.com` | 200, pull completo riuscito |
 
-Resta l'unico punto della checklist di deploy senza prova, e va eseguito su una
-macchina con Docker e accesso al registry, **prima** di toccare il cluster.
+I registry rispondono ai manifest, ma i layer transitano da CDN separati che la
+policy non consente. `solana-verify build` cerca per default
+`solanafoundation/solana-verifiable-build`, che vive su Docker Hub.
+
+**Come sbloccarlo**, in ordine di pulizia:
+
+1. allowlistare **un solo host**, `production.cloudfront.docker.com`, nella
+   policy di rete dell'ambiente: è il percorso canonico e non richiede altro;
+2. in alternativa, replicare l'immagine — **pinnata per digest, non per tag**,
+   altrimenti la riproducibilità decade — su un registry i cui blob siano
+   raggiungibili, e passarla con `solana-verify build --base-image <immagine>`.
+
+È una restrizione di policy, non un limite tecnico: va riportata, non aggirata.
+Resta l'unico punto della checklist di deploy senza prova, e va eseguito
+**prima** di toccare il cluster.
 
 ## Riproducibilità
 
